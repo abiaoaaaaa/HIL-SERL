@@ -22,7 +22,7 @@ class DefaultTrainingConfig:
 
     # "resnet" for ResNet10 from scratch and "resnet-pretrained" for frozen ResNet10 with pretrained weights
     encoder_type: str = "resnet-pretrained"
-    demo_path: str = None
+    demo_path: str = "/home/xlb/code_marvin/hil-serl/examples/experiments/resnet10_params.pkl"
     checkpoint_period: int = 0
     buffer_period: int = 0
 

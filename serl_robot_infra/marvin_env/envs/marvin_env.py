@@ -1092,7 +1092,7 @@ class MarvinEnv(gym.Env):
 
                     if points and len(points) > 0:
                         # 2. 均匀重采样为固定点数（20Hz环境 -> 10个点 = 200Hz）
-                        NUM_INTERP_POINTS = 10
+                        NUM_INTERP_POINTS = 20
                         resampled_points = self._resample_trajectory(points, NUM_INTERP_POINTS)
 
                         print(f"[step={self.curr_path_length}][关节阻抗] movLA规划={len(points)}点, "
@@ -1104,7 +1104,7 @@ class MarvinEnv(gym.Env):
                             self.robot.clear_set()
                             self.robot.set_joint_cmd_pose(arm=self.arm, joints=pt)
                             self.robot.send_cmd()
-                            time.sleep(0.005)  # 200Hz = 5ms
+                            time.sleep(0.0025)  # 200Hz = 5ms
 
                         t_send_elapsed = (time.time() - t_send_start) * 1000
                         print(f"[step={self.curr_path_length}][关节阻抗] 发送完成: {len(resampled_points)}点, "
@@ -1181,8 +1181,18 @@ class MarvinEnv(gym.Env):
         self._send_gripper_command(gripper_action)
         t["3_gripper"] = time.time()
 
-        # ==================== 4. 固定 sleep 50ms ====================
-        # time.sleep(0.05)
+        # ==================== 4. 自适应 sleep（确保20Hz节奏）====================
+        # 计算从sub_step开始到现在的耗时
+        elapsed_ms = (t["3_gripper"] - t["2a_recover"]) * 1000
+        target_duration_ms = 50.0  # 20Hz = 50ms per step
+
+        if elapsed_ms < target_duration_ms:
+            sleep_time = (target_duration_ms - elapsed_ms) / 1000.0
+            time.sleep(sleep_time)
+            print(f"[step={self.curr_path_length}][自适应sleep] 已耗时={elapsed_ms:.1f}ms, 补充sleep={sleep_time*1000:.1f}ms")
+        else:
+            print(f"[step={self.curr_path_length}][⚠️超时] 已耗时={elapsed_ms:.1f}ms > 50ms，跳过sleep")
+
         t["4_sleep"] = time.time()
 
         # ==================== 5. 抖动检测：检测关节位置突变 ====================

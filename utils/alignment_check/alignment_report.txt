@@ -1,0 +1,65 @@
+================================================================================
+观测-动作对齐性检查报告
+================================================================================
+
+检查了 5 个 episodes
+动作缩放: 位置=20.0mm, 旋转=0.050rad, 夹爪=1.0
+
+--------------------------------------------------------------------------------
+TCP Pose 对齐性统计
+--------------------------------------------------------------------------------
+
+  X (m):
+    Mean Absolute Error: 0.004797
+    Std Absolute Error:  0.004047
+    Max Absolute Error:  0.018201
+    95th Percentile:     0.012669
+
+  Y (m):
+    Mean Absolute Error: 0.003218
+    Std Absolute Error:  0.002855
+    Max Absolute Error:  0.013959
+    95th Percentile:     0.008883
+
+  Z (m):
+    Mean Absolute Error: 0.006633
+    Std Absolute Error:  0.004978
+    Max Absolute Error:  0.022329
+    95th Percentile:     0.015564
+
+  Rx (rad):
+    Mean Absolute Error: 0.012926
+    Std Absolute Error:  0.010981
+    Max Absolute Error:  0.051734
+    95th Percentile:     0.035079
+
+  Ry (rad):
+    Mean Absolute Error: 0.009789
+    Std Absolute Error:  0.008143
+    Max Absolute Error:  0.036986
+    95th Percentile:     0.025699
+
+  Rz (rad):
+    Mean Absolute Error: 0.012925
+    Std Absolute Error:  0.011801
+    Max Absolute Error:  0.049999
+    95th Percentile:     0.036068
+
+--------------------------------------------------------------------------------
+Gripper 对齐性统计
+--------------------------------------------------------------------------------
+
+  Mean Absolute Error: 0.032869
+  Std Absolute Error:  0.159387
+  Max Absolute Error:  0.950298
+  95th Percentile:     0.006994
+
+================================================================================
+解读说明
+================================================================================
+
+1. 小的误差（< 0.001）是正常的，来自控制延迟、动力学等因素
+2. 如果误差持续增大，可能存在数据采集或控制问题
+3. TCP Pose 的误差应该较小，因为动作直接控制 TCP
+4. Gripper 的误差取决于具体的控制策略
+5. 关注 Max Error 和 95th Percentile，识别异常情况

@@ -9,7 +9,9 @@ class RSCapture:
 
     def __init__(self, name, serial_number, dim=(640, 480), fps=15, depth=False, exposure=40000):
         self.name = name
-        assert serial_number in self.get_device_serial_numbers()
+        # 注释掉序列号检查：当多个相机已被占用时，枚举设备会触发 "failed to set power state" 错误
+        # pyrealsense2 会在 enable_device() 和 start() 时自动验证序列号
+        # assert serial_number in self.get_device_serial_numbers()
         self.serial_number = serial_number
         self.depth = depth
         self.pipe = rs.pipeline()

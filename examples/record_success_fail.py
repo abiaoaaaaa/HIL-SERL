@@ -15,11 +15,15 @@ flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions
 
 
 success_key = False
+reset_key = False
+
 def on_press(key):
-    global success_key
+    global success_key, reset_key
     try:
         if str(key) == 'Key.space':
             success_key = True
+        elif str(key) == "'r'":  # 按 'r' 键reset
+            reset_key = True
     except AttributeError:
         pass
 
@@ -30,7 +34,8 @@ def main(_):
     listener.start()
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    env = config.get_environment(fake_env=False, save_video=False, classifier=False)
+    # collect_classifier_data=True: 使用classifier图像但不加载分类器wrapper，避免自动done
+    env = config.get_environment(fake_env=False, save_video=False, classifier=False, collect_classifier_data=True)
 
     obs, _ = env.reset()
     successes = []

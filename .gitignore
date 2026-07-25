@@ -1,0 +1,104 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 模型文件
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pb
+*.onnx
+*.pkl.gz
+*.safetensors
+
+# 训练检查点和模型权重
+examples/classifier_ckpt/
+examples/experiments/*/checkpoints/
+checkpoints/
+weights/
+models/
+
+# 数据文件
+*.pkl
+*.npz
+*.npy
+examples/classifier_data/
+examples/demo_data/
+data/
+datasets/
+
+# Buffer 数据
+**/buffer/*.pkl
+transitions_*.pkl
+
+# 日志文件
+*.log
+logs/
+runs/
+wandb/
+tb_logs/
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# 输出文件
+outputs/
+results/
+experiments/
+
+# 大文件和二进制文件
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.bag
+*.db
+
+# ROS
+devel/
+build/
+
+# 特殊文件
+命令.txt
+.marvin参考/
