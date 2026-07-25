@@ -134,11 +134,12 @@ class MarvinEnv(gym.Env):
             dtype=np.float64,
         )
 
-        # 动作空间: [Δx, Δy, Δz, Δrx, Δry, Δrz, gripper]
+        # 动作空间: [Δx, Δy, Δz, Δry, gripper]
+        # 只保留 Y 轴旋转 (Δry), X/Z 轴旋转由硬件锁定
         # 注意: 经过 RelativeFrame 变换后进入 step(), 单位已是基座系
         self.action_space = gym.spaces.Box(
-            np.ones((7,), dtype=np.float32) * -1,
-            np.ones((7,), dtype=np.float32),
+            np.ones((5,), dtype=np.float32) * -1,
+            np.ones((5,), dtype=np.float32),
         )
 
         # 观测空间: 与FrankaEnv保持一致
@@ -151,6 +152,7 @@ class MarvinEnv(gym.Env):
                         "gripper_pose": gym.spaces.Box(-1, 1, shape=(1,)),
                         "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
                         "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                        "last_action": gym.spaces.Box(-1, 1, shape=(5,)),
                     }
                 ),
                 "images": gym.spaces.Dict(
@@ -212,12 +214,8 @@ class MarvinEnv(gym.Env):
         self.init_cameras(config.REALSENSE_CAMERAS)
         print("[MarvinEnv] 相机初始化完成")
 
-        # 当前状态缓存
-        self.currpos_xyzabc = None  # 当前笛卡尔位姿 [X,Y,Z,A,B,C] (mm 和 deg)
-        self.currpos_quat = None    # 当前四元数位姿 [x,y,z,qx,qy,qz,qw] (m 和 quat)
-        self.currpos = None         # 别名，兼容FrankaEnv
-        self.curr_joints = None     # 当前关节角度 (deg)
         self.curr_gripper_pos = 0.0
+        self.last_action = np.zeros(5, dtype=np.float32)  # [dx,dy,dz,dry,gripper]
 
         # 夹爪时间控制
         self.gripper_sleep = config.GRIPPER_SLEEP
@@ -935,21 +933,24 @@ class MarvinEnv(gym.Env):
         raw_action = action.copy()
         action = np.clip(action, self.action_space.low, self.action_space.high).copy()
 
+        # 保存当前动作到观测中（供下一步使用）
+        self.last_action = action.copy()
+
         # 🔧 10Hz 折衷方案: 分两次执行
         if self.hz == 10:
             # 位置和旋转动作分两次执行，夹爪动作保持完整
             half_action = action.copy()
-            half_action[:6] = action[:6] / 2.0  # 只分割位置和旋转
-            # half_action[6] 保持原值（夹爪）
+            half_action[:4] = action[:4] / 2.0  # 只分割位置和旋转 [dx,dy,dz,dry]
+            # half_action[4] 保持原值（夹爪）
 
             # 第 1 次: 执行前半段动作
-            self._execute_sub_step(half_action, raw_action, t, sub_step=1, gripper_action=action[6])
+            self._execute_sub_step(half_action, raw_action, t, sub_step=1, gripper_action=action[4])
 
             # 第 2 次: 执行后半段动作
-            self._execute_sub_step(half_action, raw_action, t, sub_step=2, gripper_action=action[6])
+            self._execute_sub_step(half_action, raw_action, t, sub_step=2, gripper_action=action[4])
         else:
             # 20Hz 或其他频率: 直接执行完整动作
-            self._execute_sub_step(action, raw_action, t, sub_step=0, gripper_action=action[6])
+            self._execute_sub_step(action, raw_action, t, sub_step=0, gripper_action=action[4])
 
         # ==================== 5. 更新状态并返回 ====================
         self._update_currpos()
@@ -1043,15 +1044,14 @@ class MarvinEnv(gym.Env):
         target_xyzabc = current_xyzabc.copy()
         target_xyzabc[:3] = current_xyzabc[:3] + pos_delta_mm
 
-        # 姿态增量 (参考 spacemouse._safe_move line 413: 欧拉角直接加法)
+        # 姿态增量 (只处理 Y 轴旋转 dry, X/Z 由硬件锁定)
         fixed_orient = getattr(self.config, 'FIXED_ORIENTATION', False)
         if fixed_orient:
             action_rot_rad = np.zeros(3)
         else:
-            action_rot_rad = action[3:6] * self.action_scale[1]
-            # 🔧 只保留 Y 轴旋转，屏蔽 X 和 Z 轴
-            action_rot_rad[1] = 0.0  # 屏蔽 X 轴旋转
-            action_rot_rad[0] = 0.0  # 屏蔽 Z 轴旋转
+            action_rot_rad = np.zeros(3)
+            # action[3] = dry (Y轴旋转)
+            action_rot_rad[1] = action[3] * self.action_scale[1]  # 只保留 Y 轴旋转
         target_xyzabc[3:] = current_xyzabc[3:] + np.rad2deg(action_rot_rad)
 
         # 🔧 方案3: 强制锁定 A（X轴）和 C（Z轴）旋转到 RESET_POSE 的值
@@ -1297,6 +1297,7 @@ class MarvinEnv(gym.Env):
             "gripper_pose": np.array([self.curr_gripper_pos]),
             "tcp_force": tcp_force,
             "tcp_torque": tcp_torque,
+            "last_action": self.last_action.copy(),
         }
         t["build_dict_end"] = time.time()
 

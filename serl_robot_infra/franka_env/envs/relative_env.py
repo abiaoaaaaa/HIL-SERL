@@ -91,10 +91,27 @@ class RelativeFrame(gym.Wrapper):
     def transform_action(self, action: np.ndarray):
         """
         Transform action from body(end-effector) frame into into spatial(base) frame
-        using the transform matrix. 
+        using the transform matrix.
+
+        Supports both 6-DoF (x,y,z,rx,ry,rz) and 5-DoF (x,y,z,ry,gripper) action spaces.
+        For 5-DoF, pads with zeros for rx,rz before transform, then extracts result.
         """
         action = np.array(action)  # in case action is a jax read-only array
-        action[:6] = self.transform_matrix @ action[:6]
+        if len(action) >= 6:
+            action[:6] = self.transform_matrix @ action[:6]
+        else:
+            # 5维: [dx,dy,dz,dry,gripper] → 补零为 [dx,dy,dz,rx,ry,rz]
+            action_6d = np.zeros(6)
+            action_6d[0] = action[0]  # dx
+            action_6d[1] = action[1]  # dy
+            action_6d[2] = action[2]  # dz
+            action_6d[4] = action[3]  # dry
+            # rx=0, rz=0 (保持不变, MARVIN 硬件锁定)
+            transformed_6d = self.transform_matrix @ action_6d
+            action[0] = transformed_6d[0]  # dx
+            action[1] = transformed_6d[1]  # dy
+            action[2] = transformed_6d[2]  # dz
+            action[3] = transformed_6d[4]  # dry
         return action
 
     def transform_action_inv(self, action: np.ndarray):
