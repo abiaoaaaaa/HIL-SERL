@@ -209,8 +209,8 @@ class SpacemouseIntervention(gym.ActionWrapper):
         super().__init__(env)
 
         self.gripper_enabled = True
-        if self.action_space.shape == (6,):
-            self.gripper_enabled = False
+        if self.action_space.shape == (5,):
+            self.gripper_enabled = True  # 5维也有gripper
 
         self.expert = SpaceMouseExpert()
         self.left, self.right = False, False
@@ -226,7 +226,7 @@ class SpacemouseIntervention(gym.ActionWrapper):
         expert_a, buttons = self.expert.get_action()
         self.left, self.right = tuple(buttons)
         intervened = False
-        
+
         if np.linalg.norm(expert_a) > 0.001:
             intervened = True
 
@@ -239,7 +239,11 @@ class SpacemouseIntervention(gym.ActionWrapper):
                 intervened = True
             else:
                 gripper_action = np.zeros((1,))
-            expert_a = np.concatenate((expert_a, gripper_action), axis=0)
+            # 只保留 dx,dy,dz,drz: expert_a[0:3] + expert_a[5] + gripper
+            expert_a = np.concatenate((expert_a[0:3], expert_a[5:6], gripper_action), axis=0)
+        else:
+            # 无夹爪模式: [dx,dy,dz,drz]
+            expert_a = np.concatenate((expert_a[0:3], expert_a[5:6]), axis=0)
 
         if self.action_indices is not None:
             filtered_expert_a = np.zeros_like(expert_a)
