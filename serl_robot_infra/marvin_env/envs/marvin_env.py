@@ -155,7 +155,7 @@ class MarvinEnv(gym.Env):
                 ),
                 "images": gym.spaces.Dict(
                     {
-                        key: gym.spaces.Box(0, 255, shape=(128, 128, 3), dtype=np.uint8)
+                        key: gym.spaces.Box(0, 255, shape=(256, 256, 3), dtype=np.uint8)
                         for key in config.REALSENSE_CAMERAS
                     }
                 ),
@@ -1334,7 +1334,7 @@ class MarvinEnv(gym.Env):
                     dt_reuse = (time.time() - t0) * 1000
                     print(f"[get_im] {key}: reuse from {source_key} ({dt_reuse:.1f}ms)")
 
-                    # 直接复制处理后的图像（已经是 128x128 RGB）
+                    # 直接复制处理后的图像（已经是 256x256 RGB）
                     images[key] = images[source_key].copy()
                     continue
 
@@ -1342,7 +1342,7 @@ class MarvinEnv(gym.Env):
                 rgb = cap.read()
                 dt_read = (time.time() - t0) * 1000
                 cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
-                resized = cv2.resize(cropped_rgb, (128, 128))
+                resized = cv2.resize(cropped_rgb, (256, 256))
                 images[key] = resized[..., ::-1]  # BGR -> RGB
                 dt_total = (time.time() - t0) * 1000
                 print(f"[get_im] {key}: read={dt_read:.1f}ms total={dt_total:.1f}ms")
@@ -1358,7 +1358,7 @@ class MarvinEnv(gym.Env):
             except Exception as e:
                 dt_total = (time.time() - t0) * 1000
                 print(f"[get_im] {key} 读取失败 [{dt_total:.1f}ms]: {e}")
-                images[key] = np.zeros((128, 128, 3), dtype=np.uint8)
+                images[key] = np.zeros((256, 256, 3), dtype=np.uint8)
 
         return images
 
