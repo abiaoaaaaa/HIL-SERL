@@ -134,8 +134,8 @@ class MarvinEnv(gym.Env):
             dtype=np.float64,
         )
 
-        # 动作空间: [Δx, Δy, Δz, Δry, gripper]
-        # 只保留 Y 轴旋转 (Δry), X/Z 轴旋转由硬件锁定
+        # 动作空间: [Δx, Δy, Δz, Δrz, gripper]
+        # 只保留 Z 轴旋转 (Δrz), X/Y 轴旋转由硬件锁定
         # 注意: 经过 RelativeFrame 变换后进入 step(), 单位已是基座系
         self.action_space = gym.spaces.Box(
             np.ones((5,), dtype=np.float32) * -1,
@@ -1044,21 +1044,21 @@ class MarvinEnv(gym.Env):
         target_xyzabc = current_xyzabc.copy()
         target_xyzabc[:3] = current_xyzabc[:3] + pos_delta_mm
 
-        # 姿态增量 (只处理 Y 轴旋转 dry, X/Z 由硬件锁定)
+        # 姿态增量 (只处理 Z 轴旋转 drz, X/Y 由硬件锁定)
         fixed_orient = getattr(self.config, 'FIXED_ORIENTATION', False)
         if fixed_orient:
             action_rot_rad = np.zeros(3)
         else:
             action_rot_rad = np.zeros(3)
-            # action[3] = dry (Y轴旋转)
-            action_rot_rad[1] = action[3] * self.action_scale[1]  # 只保留 Y 轴旋转
+            # action[3] = drz (Z轴旋转)
+            action_rot_rad[2] = action[3] * self.action_scale[1]  # 只保留 Z 轴旋转
         target_xyzabc[3:] = current_xyzabc[3:] + np.rad2deg(action_rot_rad)
 
-        # 🔧 方案3: 强制锁定 A（X轴）和 C（Z轴）旋转到 RESET_POSE 的值
-        # 只允许 B（Y轴）旋转变化
+        # 🔧 方案3: 强制锁定 A（X轴）和 B（Y轴）旋转到 RESET_POSE 的值
+        # 只允许 C（Z轴）旋转变化
         target_xyzabc[3] = self._RESET_POSE[3]  # 强制锁定 A（X轴旋转）
-        target_xyzabc[4] = self._RESET_POSE[4]  # 强制锁定 C（Z轴旋转）
-        # target_xyzabc[5] (B, Z轴旋转) 允许变化
+        target_xyzabc[4] = self._RESET_POSE[4]  # 强制锁定 B（Y轴旋转）
+        # target_xyzabc[5] (C, Z轴旋转) 允许变化
 
         # 安全限制
         target_xyzabc = self.clip_safety_box(target_xyzabc)
