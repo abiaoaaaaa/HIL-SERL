@@ -240,7 +240,7 @@ class SpacemouseIntervention(gym.ActionWrapper):
             else:
                 gripper_action = np.zeros((1,))
             # 只保留 dx,dy,dz,drz: expert_a[0:3] + expert_a[5] + gripper
-            expert_a = np.concatenate((expert_a[0:3], expert_a[5:6], gripper_action), axis=0)
+            expert_a = np.concatenate((expert_a[0:3], expert_a[4:5], gripper_action), axis=0)
         else:
             # 无夹爪模式: [dx,dy,dz,drz]
             expert_a = np.concatenate((expert_a[0:3], expert_a[5:6]), axis=0)

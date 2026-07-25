@@ -932,7 +932,7 @@ class MarvinEnv(gym.Env):
         # 保存原始 action 用于调试
         raw_action = action.copy()
         action = np.clip(action, self.action_space.low, self.action_space.high).copy()
-
+        print(f"[STEP_DEBUG step={self.curr_path_length}] 原始动作: {raw_action}, 裁剪后动作: {action}")
         # 保存当前动作到观测中（供下一步使用）
         self.last_action = action.copy()
 
@@ -1052,8 +1052,10 @@ class MarvinEnv(gym.Env):
             action_rot_rad = np.zeros(3)
             # action[3] = drz (Z轴旋转)
             action_rot_rad[2] = action[3] * self.action_scale[1]  # 只保留 Z 轴旋转
+        
         target_xyzabc[3:] = current_xyzabc[3:] + np.rad2deg(action_rot_rad)
-
+        print(f"[step={self.curr_path_length}][sub_step={sub_step}] 当前位姿: {current_xyzabc}, "
+              f"目标位姿增量: Δxyz={pos_delta_mm}, Δrot={np.rad2deg(action_rot_rad)}, 目标位姿: {target_xyzabc}")
         # 🔧 方案3: 强制锁定 A（X轴）和 B（Y轴）旋转到 RESET_POSE 的值
         # 只允许 C（Z轴）旋转变化
         target_xyzabc[3] = self._RESET_POSE[3]  # 强制锁定 A（X轴旋转）
@@ -1078,7 +1080,7 @@ class MarvinEnv(gym.Env):
 
         if self.impedance_mode == 'joint':
             # 关节阻抗模式：使用movLA规划 + 均匀重采样
-            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-5:
+            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-7:
                 try:
                     # 1. 用movLA规划轨迹（继承速度/加速度约束）
                     points, _ = self.kk.movLA(
@@ -1117,7 +1119,7 @@ class MarvinEnv(gym.Env):
                 print(f"[step={self.curr_path_length}][关节阻抗] 增量过小，跳过")
         else:
             # 笛卡尔阻抗模式：使用movLA规划轨迹
-            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-5:
+            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-7:
                 points, _ = self.kk.movLA(
                     start_xyzabc=current_xyzabc.tolist(),
                     end_xyzabc=target_xyzabc.tolist(),
