@@ -119,7 +119,7 @@ def parse_args():
     )
     parser.add_argument(
         '--checkpoint-dir',
-        default='examples/experiments/marvin_usb_insertion/checkpoints',
+        default='examples/experiments/marvin_usb_insertion/checkpoints1',
         help='Checkpoints 目录路径'
     )
     parser.add_argument(

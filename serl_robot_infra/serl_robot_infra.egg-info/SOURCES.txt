@@ -4,7 +4,6 @@ marvin_env/__init__.py
 marvin_env/envs/__init__.py
 marvin_env/envs/config.py
 marvin_env/envs/marvin_env.py
-marvin_env/envs/test_marvin_env.py
 marvin_env/gripper/KM_CAN.py
 marvin_env/gripper/__init__.py
 marvin_env/gripper/marvin_gripper.py

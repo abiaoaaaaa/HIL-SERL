@@ -35,7 +35,11 @@ DEFAULT_CHECKPOINT_DIR = (
     "/home/xlb/code_marvin/hil-serl/examples/experiments/"
     "marvin_usb_insertion/checkpoints"
 )
-ACTION_NAMES = ("dx", "dy", "dz", "drx", "dry", "drz", "gripper")
+ACTION_NAMES_7D = ("dx", "dy", "dz", "drx", "dry", "drz", "gripper")
+ACTION_NAMES_5D = ("dx", "dy", "dz", "drz", "gripper")
+
+# 根据数据自动选择
+ACTION_NAMES = ACTION_NAMES_5D  # 默认5D，run()中会动态覆盖
 
 
 @dataclass
@@ -298,10 +302,19 @@ def print_title(title: str) -> None:
 def infer_state_layout(state_dim: int) -> tuple[Optional[slice], Optional[slice]]:
     """
     SERLObsWrapper使用gym Dict的字母序flatten：
-    19D: gripper(1), force(3), pose(6), torque(3), vel(6)
-    13D: gripper(1), pose(6), vel(6)
+
+    旧版 (无 last_action):
+      19D: gripper_pose(1), tcp_force(3), tcp_pose(6), tcp_torque(3), tcp_vel(6)
+      13D: gripper_pose(1), tcp_pose(6), tcp_vel(6)
+
+    新版 (含 last_action):
+      24D: gripper_pose(1), last_action(5), tcp_force(3), tcp_pose(6), tcp_torque(3), tcp_vel(6)
     """
+    if state_dim == 24:
+        # 新版：gripper(1) + last_action(5) + force(3) + pose(6) + torque(3) + vel(6)
+        return slice(9, 15), slice(18, 24)
     if state_dim == 19:
+        # 旧版：gripper(1) + force(3) + pose(6) + torque(3) + vel(6)
         return slice(4, 10), slice(13, 19)
     if state_dim == 13:
         return slice(1, 7), slice(7, 13)
@@ -417,22 +430,30 @@ def print_dataset_summary(
 
 def print_action_size(data: LoadedData) -> None:
     print_title("2. Policy与人工动作大小")
+    is_7d = data.actions.shape[1] == 7
+    rot_cols = slice(3, 6) if is_7d else 3  # 7D: 3轴旋转, 5D: drz
+    rot_label = "旋转Norm" if is_7d else "旋转(drz)"
+    act_cols = slice(0, 6) if is_7d else slice(0, 4)  # 不含gripper
+
     print(
         f"{'来源':<10}{'步数':>8}{'平移Norm中位':>16}"
-        f"{'平移Norm P95':>15}{'旋转Norm中位':>16}"
-        f"{'旋转Norm P95':>15}{'任一维饱和':>14}"
+        f"{'平移Norm P95':>15}{rot_label + '中位':>16}"
+        f"{rot_label + 'P95':>15}{'任一维饱和':>14}"
     )
     for name, mask in (("Policy", ~data.human), ("人工", data.human)):
         actions = data.actions[mask]
         trans_norm = np.linalg.norm(actions[:, :3], axis=1)
-        rot_norm = np.linalg.norm(actions[:, 3:6], axis=1)
-        saturation = np.any(np.abs(actions[:, :6]) > 0.95, axis=1)
+        if is_7d:
+            rot_abs = np.linalg.norm(actions[:, 3:6], axis=1)
+        else:
+            rot_abs = np.abs(actions[:, 3])
+        saturation = np.any(np.abs(actions[:, act_cols]) > 0.95, axis=1)
         print(
             f"{name:<10}{len(actions):>8d}"
             f"{fmt(median(trans_norm)):>16}"
             f"{fmt(percentile(trans_norm, 95)):>15}"
-            f"{fmt(median(rot_norm)):>16}"
-            f"{fmt(percentile(rot_norm, 95)):>15}"
+            f"{fmt(median(rot_abs)):>16}"
+            f"{fmt(percentile(rot_abs, 95)):>15}"
             f"{(fmt(percent(saturation), 1) + '%'):>14}"
         )
 
@@ -483,17 +504,21 @@ def print_action_jitter(
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     print_title("3. 相邻动作抖动（核心指标）")
     indices, categories = pair_categories(data, continuous)
+    is_7d = data.actions.shape[1] == 7
+    act_dim = 6 if is_7d else 4  # 7D: dx,dy,dz,drx,dry,drz; 5D: dx,dy,dz,drz
+    dim_label = "6D" if is_7d else "4D"
+
     print(
-        f"{'相邻来源':<16}{'对数':>8}{'6D跳变均值':>14}"
-        f"{'6D跳变P95':>14}{'平移跳变均值':>16}"
+        f"{'相邻来源':<16}{'对数':>8}{dim_label + '跳变均值':>14}"
+        f"{dim_label + '跳变P95':>14}{'平移跳变均值':>16}"
         f"{'平移跳变P95':>15}{'平移反向':>12}"
     )
     for name, category_mask in categories.items():
         selected = indices[category_mask]
         previous = data.actions[selected - 1]
         current = data.actions[selected]
-        jump_6d = np.linalg.norm(
-            current[:, :6] - previous[:, :6], axis=1
+        jump_act = np.linalg.norm(
+            current[:, :act_dim] - previous[:, :act_dim], axis=1
         )
         jump_translation = np.linalg.norm(
             current[:, :3] - previous[:, :3], axis=1
@@ -503,8 +528,8 @@ def print_action_jitter(
         )
         print(
             f"{name:<16}{len(selected):>8d}"
-            f"{fmt(mean(jump_6d)):>14}"
-            f"{fmt(percentile(jump_6d, 95)):>14}"
+            f"{fmt(mean(jump_act)):>14}"
+            f"{fmt(percentile(jump_act, 95)):>14}"
             f"{fmt(mean(jump_translation)):>16}"
             f"{fmt(percentile(jump_translation, 95)):>15}"
             f"{(fmt(reversal, 1) + '%'):>12}"
@@ -516,7 +541,9 @@ def print_action_jitter(
         f"Policy连续动作各轴符号翻转率"
         f"（两步绝对值都>{deadband}才计入）："
     )
-    for axis, name in enumerate(ACTION_NAMES[:6]):
+    is_7d = data.actions.shape[1] == 7
+    n_non_gripper = 6 if is_7d else 4  # 7D: dx,dy,dz,drx,dry,drz; 5D: dx,dy,dz,drz
+    for axis, name in enumerate(ACTION_NAMES[:n_non_gripper]):
         previous = data.actions[policy_pairs - 1, axis]
         current = data.actions[policy_pairs, axis]
         valid = (
@@ -593,8 +620,9 @@ def print_observed_motion(
 
 def print_gripper_summary(data: LoadedData) -> None:
     print_title("5. 夹爪命令与潜在阻塞")
-    gripper_action = data.actions[:, 6]
-    gripper_position = data.states[:, 0]
+    gripper_idx = 6 if data.actions.shape[1] == 7 else 4
+    gripper_action = data.actions[:, gripper_idx]
+    gripper_position = data.states[:, 0]  # 字母序: gripper_pose 在索引0
     next_gripper_position = data.next_states[:, 0]
     for name, mask in (("Policy", ~data.human), ("人工", data.human)):
         strong = (np.abs(gripper_action) > 0.5) & mask
@@ -841,6 +869,160 @@ def print_conclusion(
     )
 
 
+def print_reward_analysis(
+    data: LoadedData,
+    ranges: list[tuple[int, int]],
+    continuous: np.ndarray,
+) -> None:
+    print_title("9. 奖励函数与抖动关系分析")
+
+    # 1. 奖励分布统计
+    print("\n--- 9.1 奖励分布 ---")
+    policy_rewards = data.rewards[~data.human]
+    human_rewards = data.rewards[data.human]
+    all_rewards = data.rewards
+
+    print(f"奖励样本: 总数={len(all_rewards)}, "
+          f"Policy步={len(policy_rewards)}, 人工步={len(human_rewards)}")
+    print(f"Reward 唯一值: {np.unique(all_rewards).tolist()}")
+    for label, rw in [("全部", all_rewards), ("Policy步", policy_rewards), ("人工步", human_rewards)]:
+        pos = int((rw > 0).sum())
+        neg = int((rw < 0).sum())
+        zero = int((rw == 0).sum())
+        print(f"  {label}: >0={pos} ({fmt(100*pos/len(rw),1)}%), "
+              f"<0={neg} ({fmt(100*neg/len(rw),1)}%), "
+              f"==0={zero} ({fmt(100*zero/len(rw),1)}%), "
+              f"均值={fmt(mean(rw), 4)}")
+
+    # 2. 每个 episode 的奖励、抖动、人工占比汇总
+    print("\n--- 9.2 Episode 级别: 奖励 vs 抖动 vs 人工占比 ---")
+    rows = episode_rows(data, ranges, continuous, deadband=0.03)
+    valid_rows = [r for r in rows if r["policy_pairs"] >= 3 and np.isfinite(r["jump_mean"])]
+
+    if not valid_rows:
+        print("有效 episode 数不足。")
+        return
+
+    jumps = np.array([r["jump_mean"] for r in valid_rows])
+    reversals = np.array([r["reversal"] for r in valid_rows if np.isfinite(r["reversal"])])
+    human_pcts = np.array([r["human_percent"] for r in valid_rows])
+    successes = np.array([r["success"] for r in valid_rows])
+
+    # 按抖动三分位分组
+    jump_thresholds = np.percentile(jumps, [33, 67])
+    low_jitter = jumps <= jump_thresholds[0]
+    mid_jitter = (jumps > jump_thresholds[0]) & (jumps <= jump_thresholds[1])
+    high_jitter = jumps > jump_thresholds[1]
+
+    print(f"\n抖动三分位阈值: 低≤{fmt(jump_thresholds[0])} < 中≤{fmt(jump_thresholds[1])} < 高")
+    print(f"{'抖动等级':<12}{'Episode数':>10}{'成功率':>10}{'平均人工占比':>14}{'平均抖动':>12}{'平均反向率':>12}")
+    for label, mask in [("低抖动", low_jitter), ("中抖动", mid_jitter), ("高抖动", high_jitter)]:
+        n = int(mask.sum())
+        suc = float(np.mean(successes[mask])) * 100 if n > 0 else float("nan")
+        hp = mean(human_pcts[mask])
+        jm = mean(jumps[mask])
+        rev = mean(reversals[mask]) if n > 0 else float("nan")
+        print(f"{label:<12}{n:>10d}{fmt(suc,1) + '%':>10}"
+              f"{fmt(hp,1) + '%':>14}{fmt(jm):>12}{fmt(rev,1) + '%':>12}")
+
+    # 2b. 按人工占比分三组
+    hp_thresholds = np.percentile(human_pcts, [33, 67])
+    low_hp = human_pcts <= hp_thresholds[0]
+    mid_hp = (human_pcts > hp_thresholds[0]) & (human_pcts <= hp_thresholds[1])
+    high_hp = human_pcts > hp_thresholds[1]
+
+    print(f"\n人工占比三分位阈值: 低≤{fmt(hp_thresholds[0],1)}% < 中≤{fmt(hp_thresholds[1],1)}% < 高")
+    print(f"{'人工占比':<12}{'Episode数':>10}{'成功率':>10}{'平均抖动':>12}{'平均反向率':>12}")
+    for label, mask in [("低人工占比", low_hp), ("中人工占比", mid_hp), ("高人工占比", high_hp)]:
+        n = int(mask.sum())
+        suc = float(np.mean(successes[mask])) * 100 if n > 0 else float("nan")
+        jm = mean(jumps[mask])
+        rev = mean(reversals[mask]) if n > 0 else float("nan")
+        print(f"{label:<12}{n:>10d}{fmt(suc,1) + '%':>10}{fmt(jm):>12}{fmt(rev,1) + '%':>12}")
+
+    # 3. 奖励事件分析
+    print("\n--- 9.3 奖励事件分析 ---")
+    pos_mask = data.rewards > 0
+    if np.any(pos_mask):
+        pos_indices = np.flatnonzero(pos_mask)
+        pos_jumps = []
+        pos_rev = []
+        for idx in pos_indices:
+            if idx > 0:
+                prev = data.actions[idx - 1, :3]
+                cur = data.actions[idx, :3]
+                pos_jumps.append(np.linalg.norm(cur - prev))
+                if np.linalg.norm(prev) > 0.03 and np.linalg.norm(cur) > 0.03:
+                    pos_rev.append(float(np.sum(prev * cur) < 0))
+        if pos_jumps:
+            print(f"正奖励事件 (reward>0): {int(pos_mask.sum())} 次")
+            print(f"  奖励前→奖励步 平移跳变 均值={fmt(mean(np.array(pos_jumps)))} "
+                  f"P95={fmt(percentile(np.array(pos_jumps), 95))}")
+        if pos_rev:
+            print(f"  奖励步平移反向率: {fmt(100*mean(np.array(pos_rev)), 1)}%")
+
+    # 4. 奖励分布变化趋势 (按 epoch)
+    print("\n--- 9.4 奖励随训练变化趋势 ---")
+    epoch_size = 50
+    n_epochs = len(valid_rows) // epoch_size
+    if n_epochs >= 3:
+        print(f"{'Epoch':>8}{'Ep范围':>12}{'成功次数':>10}{'成功率':>10}"
+              f"{'正奖励':>10}{'零奖励':>10}{'负奖励':>10}{'平均抖动':>12}")
+        for e in range(n_epochs):
+            ep_rows = valid_rows[e*epoch_size:(e+1)*epoch_size]
+            # 统计这些 episode 在原数据中的位置
+            start_idx = ranges[ep_rows[0]["episode"] - 1][0]
+            end_idx = ranges[ep_rows[-1]["episode"] - 1][1]
+            seg_rewards = data.rewards[start_idx:end_idx]
+            pos = int((seg_rewards > 0).sum())
+            neg = int((seg_rewards < 0).sum())
+            zero = int((seg_rewards == 0).sum())
+            suc = float(np.mean([r["success"] for r in ep_rows])) * 100
+            jm = mean(np.array([r["jump_mean"] for r in ep_rows]))
+            print(f"{e+1:>8d}{ep_rows[0]['episode']}-{ep_rows[-1]['episode']:>5}"
+                  f"{int(sum([r['success'] for r in ep_rows])):>10d}"
+                  f"{fmt(suc,1) + '%':>10}"
+                  f"{pos:>10d}{zero:>10d}{neg:>10d}{fmt(jm):>12}")
+
+    # 5. 平滑度惩罚分析 (仅新版5D数据)
+    print("\n--- 9.5 平滑度惩罚分析 ---")
+    is_7d = data.actions.shape[1] == 7
+    if is_7d:
+        print("旧版 7D 数据（无 last_action 观测），无平滑度惩罚 (smoothness_penalty)。")
+        print("所有 reward ∈ {0, 1}，仅由脚踏板/分类器触发。")
+    else:
+        neg_rewards = data.rewards[data.rewards < 0]
+        neg_frac = len(neg_rewards) / len(data.rewards) if len(data.rewards) > 0 else 0
+        if neg_frac > 0:
+            print(f"负奖励步数: {len(neg_rewards)}/{len(data.rewards)} ({fmt(100*neg_frac, 1)}%)")
+            print(f"负奖励范围: [{fmt(float(np.min(neg_rewards)), 6)}, "
+                  f"{fmt(float(np.max(neg_rewards)), 6)}]")
+            print(f"负奖励均值: {fmt(mean(neg_rewards), 6)}")
+            print("这些负奖励 = -smoothness_penalty = -0.001 * ||last_action(t) - last_action(t-1)||")
+        else:
+            print("未发现负奖励，smoothness_penalty 可能为 0 或被禁用。")
+
+        zero_rewards = data.rewards[data.rewards == 0]
+        pos_rewards = data.rewards[data.rewards > 0]
+        print(f"奖励分布: 正={len(pos_rewards)} ({fmt(100*len(pos_rewards)/len(data.rewards),1)}%), "
+              f"零={len(zero_rewards)} ({fmt(100*len(zero_rewards)/len(data.rewards),1)}%), "
+              f"负={len(neg_rewards)} ({fmt(100*len(neg_rewards)/len(data.rewards),1)}%)")
+
+    # 6. 跨数据集对比提示
+    print("\n--- 9.6 奖励函数设计要点 ---")
+    print("旧版 (7D, 无 last_action):")
+    print("  奖励来源: 仅脚踏板 (Shift+←) → reward=1.0")
+    print("  reward ∈ {0, 1}, 无平滑度惩罚")
+    print("  问题: Policy 不知道自己在做什么, 抖动无法被惩罚")
+    print()
+    print("新版 (5D, 有 last_action):")
+    print("  奖励来源: 分类器 + 脚踏板 → base_reward ∈ {0, 1}")
+    print("          smoothness_penalty = 0.001 * ||last_action(t) - last_action(t-1)||")
+    print("          final_reward = base_reward - smoothness_penalty")
+    print("          (sigmoid > 1.70 禁用分类器, 仅用脚踏板)")
+    print("  效果: 通过 last_action 差分惩罚, 鼓励平滑动作")
+
+
 def main() -> int:
     args = parse_args()
     checkpoint_dir = os.path.abspath(args.checkpoint_dir)
@@ -863,12 +1045,21 @@ def main() -> int:
         print(f"分析失败: {exc}", file=sys.stderr)
         return 1
 
-    if data.actions.ndim != 2 or data.actions.shape[1] < 7:
+    if data.actions.ndim != 2 or data.actions.shape[1] < 5:
         print(
             f"Action shape异常: {data.actions.shape}",
             file=sys.stderr,
         )
         return 1
+
+    # 根据数据自动选择动作名称
+    global ACTION_NAMES
+    if data.actions.shape[1] == 7:
+        ACTION_NAMES = ACTION_NAMES_7D
+        print(f"[检测] 发现 7D 动作空间 (旧版: dx,dy,dz,drx,dry,drz,gripper)")
+    else:
+        ACTION_NAMES = ACTION_NAMES_5D
+        print(f"[检测] 发现 {data.actions.shape[1]}D 动作空间 (新版: dx,dy,dz,drz,gripper)")
 
     continuous = continuity_mask(data)
     ranges = print_dataset_summary(
@@ -897,6 +1088,7 @@ def main() -> int:
         args.top_episodes,
     )
     print_conclusion(data, indices, categories)
+    print_reward_analysis(data, ranges, continuous)
     return 0
 
 

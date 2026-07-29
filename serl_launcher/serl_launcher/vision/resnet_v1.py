@@ -205,8 +205,7 @@ class ResNetEncoder(nn.Module):
     use_film: bool = False
     bottleneck_dim: Optional[int] = None
     pre_pooling: bool = True
-    image_size: tuple = (256, 256)
-
+    image_size: tuple = (128, 128)
     @nn.compact
     def __call__(
         self,

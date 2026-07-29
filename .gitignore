@@ -85,7 +85,9 @@ Thumbs.db
 # 输出文件
 outputs/
 results/
-experiments/
+# 只排除 experiments 下的 checkpoints 目录，保留配置文件
+examples/experiments/*/checkpoints/
+examples/experiments/*/checkpoints*/
 
 # 大文件和二进制文件
 *.mp4

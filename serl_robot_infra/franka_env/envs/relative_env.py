@@ -97,6 +97,7 @@ class RelativeFrame(gym.Wrapper):
         For 5-DoF, pads with zeros for rx,ry before transform, then extracts result.
         """
         action = np.array(action)  # in case action is a jax read-only array
+        # print(f"[RELATIVE] input action: {np.array2string(action, precision=5, suppress_small=True)}")
         if len(action) >= 6:
             action[:6] = self.transform_matrix @ action[:6]
         else:
@@ -105,13 +106,17 @@ class RelativeFrame(gym.Wrapper):
             action_6d[0] = action[0]  # dx
             action_6d[1] = action[1]  # dy
             action_6d[2] = action[2]  # dz
-            action_6d[5] = action[3]  # drz
-            # rx=0, ry=0 (保持不变, MARVIN 硬件锁定)
+            action_6d[4] = action[3]  # drz → EE ry 槽位（EE Y≡基座-Z，映射为基座Z旋转）
+            # rx=0, rz=0 (保持不变)
+            # print(f"[RELATIVE] padded 6D: {np.array2string(action_6d, precision=5, suppress_small=True)}")
+            # print(f"[RELATIVE] transform_matrix:\n{self.transform_matrix}")
             transformed_6d = self.transform_matrix @ action_6d
+            # print(f"[RELATIVE] transformed 6D: {np.array2string(transformed_6d, precision=5, suppress_small=True)}")
             action[0] = transformed_6d[0]  # dx
             action[1] = transformed_6d[1]  # dy
             action[2] = transformed_6d[2]  # dz
             action[3] = transformed_6d[5]  # drz
+        # print(f"[RELATIVE] output action: {np.array2string(action, precision=5, suppress_small=True)}")
         return action
 
     def transform_action_inv(self, action: np.ndarray):

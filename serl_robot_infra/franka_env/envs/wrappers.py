@@ -53,11 +53,13 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         start_time = time.time()
         obs, rew, done, truncated, info = self.env.step(action)
         rew = self.compute_reward(obs)
-        done = done or rew
-        info['succeed'] = bool(rew)
+        # 修复: 只有奖励 >= 0.5 才判定为成功并触发 done
+        # 这样支持负奖励惩罚（如动作平滑度），同时保持正确的 episode 终止逻辑
+        done = done or (rew >= 0.5)
+        info['succeed'] = bool(rew >= 0.5)
         if self.target_hz is not None:
             time.sleep(max(0, 1/self.target_hz - (time.time() - start_time)))
-            
+
         return obs, rew, done, truncated, info
 
     def reset(self, **kwargs):
@@ -227,6 +229,9 @@ class SpacemouseIntervention(gym.ActionWrapper):
         self.left, self.right = tuple(buttons)
         intervened = False
 
+        # print(f"[SM_ACTION] raw_expert_a(6D): {np.array2string(expert_a, precision=4, suppress_small=True)}")
+        # print(f"[SM_ACTION] buttons: left={self.left}, right={self.right}")
+
         if np.linalg.norm(expert_a) > 0.001:
             intervened = True
 
@@ -239,8 +244,9 @@ class SpacemouseIntervention(gym.ActionWrapper):
                 intervened = True
             else:
                 gripper_action = np.zeros((1,))
-            # 只保留 dx,dy,dz,drz: expert_a[0:3] + expert_a[5] + gripper
+            # 只保留 dx,dy,dz,dry: expert_a[0:3] + expert_a[4] (EE ry→基座Z旋转)
             expert_a = np.concatenate((expert_a[0:3], expert_a[4:5], gripper_action), axis=0)
+            # print(f"[SM_ACTION] expert_a_5D: {np.array2string(expert_a, precision=4, suppress_small=True)}")
         else:
             # 无夹爪模式: [dx,dy,dz,drz]
             expert_a = np.concatenate((expert_a[0:3], expert_a[5:6]), axis=0)
@@ -251,8 +257,10 @@ class SpacemouseIntervention(gym.ActionWrapper):
             expert_a = filtered_expert_a
 
         if intervened:
+            # print(f"[SM_ACTION] intervened=True, returning: {np.array2string(expert_a, precision=4, suppress_small=True)}")
             return expert_a, True
 
+        # print(f"[SM_ACTION] not intervened, policy_action: {np.array2string(action, precision=4, suppress_small=True)}")
         return action, False
 
     def step(self, action):

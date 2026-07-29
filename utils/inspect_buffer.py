@@ -55,7 +55,7 @@ def parse_args():
     )
     parser.add_argument(
         "--checkpoint-dir",
-        default="examples/experiments/marvin_usb_insertion/checkpoints",
+        default="examples/experiments/marvin_usb_insertion/checkpoints1",
         help="Checkpoints 目录路径"
     )
     parser.add_argument(
@@ -325,7 +325,7 @@ def main():
     analyze_structure(transitions)
 
     # 统计分析
-    analyze_statistics(transitions)
+    # analyze_statistics(transitions)
 
     # Episode 分析
     if args.show_episodes:

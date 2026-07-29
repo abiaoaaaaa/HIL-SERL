@@ -289,7 +289,7 @@ class CropSelector:
             cv2.imshow(preview_win, cropped)
 
 def load_camera_images():
-    """加载 test_single_camera.py 保存的图像"""
+    """从 camera_snapshots 目录加载最新的相机快照"""
     config = MarvinUSBEnvConfig()
     images = {}
 
@@ -297,21 +297,33 @@ def load_camera_images():
     print("加载相机快照...")
     print("=" * 70 + "\n")
 
-    # 查找图像文件
+    # camera_snapshots 目录路径
+    snapshots_dir = os.path.join(project_root, 'utils/visualization_tools/camera_snapshots')
+
+    if not os.path.exists(snapshots_dir):
+        print(f"✗ 快照目录不存在: {snapshots_dir}")
+        print(f"  请先运行: python utils/visualization_tools/view_cameras.py")
+        return images
+
+    # 查找每个相机的最新快照
     for cam_name in ['wrist_1', 'wrist_2', 'side_policy']:
-        # 查找最新的测试图像
-        pattern = f"{cam_name}_test.jpg"
-        if os.path.exists(pattern):
-            img = cv2.imread(pattern)
+        # 查找该相机的所有快照（按时间排序）
+        pattern = os.path.join(snapshots_dir, f"{cam_name}_*.jpg")
+        files = sorted(glob.glob(pattern), reverse=True)  # 最新的在前
+
+        if files:
+            latest_file = files[0]
+            img = cv2.imread(latest_file)
             if img is not None:
                 images[cam_name] = img
                 h, w = img.shape[:2]
-                print(f"✓ 加载 {cam_name}: {w}x{h} from {pattern}")
+                basename = os.path.basename(latest_file)
+                print(f"✓ 加载 {cam_name}: {w}x{h} from {basename}")
             else:
-                print(f"✗ 无法读取 {pattern}")
+                print(f"✗ 无法读取 {latest_file}")
         else:
-            print(f"✗ 未找到 {pattern}")
-            print(f"  请先运行: python test_single_camera.py")
+            print(f"✗ 未找到 {cam_name} 的快照")
+            print(f"  请先运行: python utils/visualization_tools/view_cameras.py")
 
     # side_classifier 使用 side_policy 的图像
     if 'side_policy' in images:

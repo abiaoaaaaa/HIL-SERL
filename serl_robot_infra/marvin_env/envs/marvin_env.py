@@ -157,7 +157,7 @@ class MarvinEnv(gym.Env):
                 ),
                 "images": gym.spaces.Dict(
                     {
-                        key: gym.spaces.Box(0, 255, shape=(256, 256, 3), dtype=np.uint8)
+                        key: gym.spaces.Box(0, 255, shape=(128, 128, 3), dtype=np.uint8)
                         for key in config.REALSENSE_CAMERAS
                     }
                 ),
@@ -970,9 +970,13 @@ class MarvinEnv(gym.Env):
                 print(f"         value={value}")
             print(f"{'='*70}\n")
 
-        reward = self.compute_reward(obs)
+        # 🔍 DEBUG: 打印当前动作（每步）
+        print(f"[ACTION_DEBUG step={self.curr_path_length}] action={np.array2string(action, precision=4, suppress_small=True)} "
+              f"[dx={action[0]:.4f}, dy={action[1]:.4f}, dz={action[2]:.4f}, drz={action[3]:.4f}, gripper={action[4]:.4f}]")
+
+        reward = self.compute_reward(obs, action)
         t["5c_reward"] = time.time()
-        done = self.curr_path_length >= self.max_episode_length or reward
+        done = self.curr_path_length >= self.max_episode_length or reward > 0.9  # 任务完成
 
         if self.curr_path_length % 10 == 0 or done:
             current_pose = obs["state"]["tcp_pose"]
@@ -1052,10 +1056,14 @@ class MarvinEnv(gym.Env):
             action_rot_rad = np.zeros(3)
             # action[3] = drz (Z轴旋转)
             action_rot_rad[2] = action[3] * self.action_scale[1]  # 只保留 Z 轴旋转
-        
+
         target_xyzabc[3:] = current_xyzabc[3:] + np.rad2deg(action_rot_rad)
-        print(f"[step={self.curr_path_length}][sub_step={sub_step}] 当前位姿: {current_xyzabc}, "
-              f"目标位姿增量: Δxyz={pos_delta_mm}, Δrot={np.rad2deg(action_rot_rad)}, 目标位姿: {target_xyzabc}")
+
+        print(f"[SM2ENV] action_raw: {np.array2string(action, precision=5, suppress_small=True)}")
+        print(f"[SM2ENV] pos_delta_mm: {np.array2string(pos_delta_mm, precision=3, suppress_small=True)}, "
+              f"rot_delta_rad: {np.array2string(np.rad2deg(action_rot_rad), precision=3, suppress_small=True)} deg")
+        print(f"[SM2ENV] current_xyzabc: {np.array2string(current_xyzabc, precision=3, suppress_small=True)}")
+        print(f"[SM2ENV] target_xyzabc: {np.array2string(target_xyzabc, precision=3, suppress_small=True)}")
         # 🔧 方案3: 强制锁定 A（X轴）和 B（Y轴）旋转到 RESET_POSE 的值
         # 只允许 C（Z轴）旋转变化
         target_xyzabc[3] = self._RESET_POSE[3]  # 强制锁定 A（X轴旋转）
@@ -1080,7 +1088,7 @@ class MarvinEnv(gym.Env):
 
         if self.impedance_mode == 'joint':
             # 关节阻抗模式：使用movLA规划 + 均匀重采样
-            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-7:
+            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-5:
                 try:
                     # 1. 用movLA规划轨迹（继承速度/加速度约束）
                     points, _ = self.kk.movLA(
@@ -1119,7 +1127,7 @@ class MarvinEnv(gym.Env):
                 print(f"[step={self.curr_path_length}][关节阻抗] 增量过小，跳过")
         else:
             # 笛卡尔阻抗模式：使用movLA规划轨迹
-            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-7:
+            if delta_dist_mm > 0.01 or delta_rot_rad > 1e-5:
                 points, _ = self.kk.movLA(
                     start_xyzabc=current_xyzabc.tolist(),
                     end_xyzabc=target_xyzabc.tolist(),
@@ -1228,12 +1236,15 @@ class MarvinEnv(gym.Env):
     # 奖励计算 (统一使用 scipy 标准转换)
     # ==========================================================================
 
-    def compute_reward(self, obs) -> bool:
+    def compute_reward(self, obs, action) -> float:
         """
-        判断是否完成任务。
+        计算奖励，包含任务完成判断和动作平滑惩罚。
 
         当前姿态 (obs) 和目标姿态 (config.TARGET_POSE) 都使用
         标准 scipy Rotation 约定，确保一致性。
+
+        Returns:
+            reward: 任务完成时为 1.0 - action_penalty，否则为 -action_penalty
         """
         current_pose = obs["state"]["tcp_pose"]  # [x,y,z,qx,qy,qz,qw] (m, quat)
 
@@ -1247,11 +1258,21 @@ class MarvinEnv(gym.Env):
         diff_euler = Rotation.from_matrix(diff_rot).as_euler("xyz")
         delta_rot = np.abs(np.rad2deg(diff_euler))
 
-        if np.all(delta_xyz < self._REWARD_THRESHOLD[:3]) and \
-           np.all(delta_rot < self._REWARD_THRESHOLD[3:]):
-            return True
+        # 任务完成判断
+        task_success = (
+            np.all(delta_xyz < self._REWARD_THRESHOLD[:3]) and
+            np.all(delta_rot < self._REWARD_THRESHOLD[3:])
+        )
 
-        return False
+        # 动作平滑惩罚：只对位置+旋转计算（不包括夹爪 action[4]）
+        action_diff = action[:4] - self.last_action[:4]  # [dx, dy, dz, dry]
+        action_penalty = 0.05 * np.sum(action_diff ** 2)  # λ=0.05, L2平方
+
+        # 返回 reward
+        if task_success:
+            return 1.0 - action_penalty
+        else:
+            return -action_penalty
 
     # ==========================================================================
     # 观测
@@ -1337,7 +1358,7 @@ class MarvinEnv(gym.Env):
                     dt_reuse = (time.time() - t0) * 1000
                     print(f"[get_im] {key}: reuse from {source_key} ({dt_reuse:.1f}ms)")
 
-                    # 直接复制处理后的图像（已经是 256x256 RGB）
+                    # 直接复制处理后的图像（已经是 128x128 RGB）
                     images[key] = images[source_key].copy()
                     continue
 
@@ -1345,7 +1366,7 @@ class MarvinEnv(gym.Env):
                 rgb = cap.read()
                 dt_read = (time.time() - t0) * 1000
                 cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
-                resized = cv2.resize(cropped_rgb, (256, 256))
+                resized = cv2.resize(cropped_rgb, (128, 128))
                 images[key] = resized[..., ::-1]  # BGR -> RGB
                 dt_total = (time.time() - t0) * 1000
                 print(f"[get_im] {key}: read={dt_read:.1f}ms total={dt_total:.1f}ms")
@@ -1361,7 +1382,7 @@ class MarvinEnv(gym.Env):
             except Exception as e:
                 dt_total = (time.time() - t0) * 1000
                 print(f"[get_im] {key} 读取失败 [{dt_total:.1f}ms]: {e}")
-                images[key] = np.zeros((256, 256, 3), dtype=np.uint8)
+                images[key] = np.zeros((128, 128, 3), dtype=np.uint8)
 
         return images
 
