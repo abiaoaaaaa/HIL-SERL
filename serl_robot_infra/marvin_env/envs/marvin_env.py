@@ -932,6 +932,11 @@ class MarvinEnv(gym.Env):
         # 保存原始 action 用于调试
         raw_action = action.copy()
         action = np.clip(action, self.action_space.low, self.action_space.high).copy()
+        # Final execution-side guard: applies to policy and intervention actions.
+        # Only Cartesian translation (dx, dy, dz) is constrained; rotation and
+        # gripper semantics remain unchanged.
+        position_limit = getattr(self.config, "POSITION_ACTION_LIMIT", 1.0)
+        action[:3] = np.clip(action[:3], -position_limit, position_limit)
         print(f"[STEP_DEBUG step={self.curr_path_length}] 原始动作: {raw_action}, 裁剪后动作: {action}")
         # 保存当前动作到观测中（供下一步使用）
         self.last_action = action.copy()
@@ -1408,6 +1413,7 @@ class MarvinEnv(gym.Env):
         self._recover()
 
         self.curr_path_length = 0
+        self.last_action = np.zeros(5, dtype=np.float32)
         self._update_currpos()
 
         print("[MarvinEnv] 重置完成\n")

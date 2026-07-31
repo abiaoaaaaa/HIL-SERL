@@ -105,6 +105,7 @@ class MarvinUSBEnv(MarvinEnv):
 
         # ==================== 重置Episode ====================
         self.curr_path_length = 0
+        self.last_action = np.zeros(5, dtype=np.float32)
         self._update_currpos()
 
         print("[MarvinUSBEnv] 重置完成，开始episode\n")
@@ -112,7 +113,13 @@ class MarvinUSBEnv(MarvinEnv):
         obs = self._get_obs()
         return obs, {"succeed": False}
 
-    def _movla_to_xyzabc(self, target_xyzabc: np.ndarray, auto_segment: bool = True):
+    def _movla_to_xyzabc(
+        self,
+        target_xyzabc: np.ndarray,
+        auto_segment: bool = True,
+        vel: int = 100,
+        acc: int = 100,
+    ):
         """
         执行笛卡尔空间线性移动
 
@@ -169,8 +176,8 @@ class MarvinUSBEnv(MarvinEnv):
                 start_xyzabc=current_pose.tolist(),
                 end_xyzabc=waypoint_xyzabc.tolist(),
                 ref_joints=current_joints,
-                vel=100,
-                acc=100,
+                vel=vel,
+                acc=acc,
                 freq_hz=100
             )
 
@@ -227,7 +234,11 @@ class MarvinUSBEnv(MarvinEnv):
         for attempt in range(max_retries):
             self.robot.clear_set()
             self.robot.set_state(arm=self.arm, state=1)
-            self.robot.set_vel_acc(arm=self.arm, velRatio=50, AccRatio=50)
+            self.robot.set_vel_acc(
+                arm=self.arm,
+                velRatio=self.config.RESET_VEL_RATIO,
+                AccRatio=self.config.RESET_ACC_RATIO,
+            )
             self.robot.send_cmd()
             time.sleep(0.3)  # 初始等待
 
@@ -260,9 +271,17 @@ class MarvinUSBEnv(MarvinEnv):
             reset_pose[5] += np.rad2deg(np.random.uniform(
                 -self.config.RANDOM_RZ_RANGE, self.config.RANDOM_RZ_RANGE
             ))
-            self._movla_to_xyzabc(reset_pose)
+            self._movla_to_xyzabc(
+                reset_pose,
+                vel=self.config.RESET_MOVLA_VEL,
+                acc=self.config.RESET_MOVLA_ACC,
+            )
         else:
-            self._movla_to_xyzabc(self.config.RESET_POSE)
+            self._movla_to_xyzabc(
+                self.config.RESET_POSE,
+                vel=self.config.RESET_MOVLA_VEL,
+                acc=self.config.RESET_MOVLA_ACC,
+            )
 
         print("[go_to_reset] 等待到位...")
         time.sleep(0.5)

@@ -43,6 +43,18 @@ flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
 flags.DEFINE_multi_string("demo_path", None, "Path to the demo data.")
 flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
+flags.DEFINE_string(
+    "restore_checkpoint_path", None, "Optional checkpoint directory used only to warm-start training."
+)
+flags.DEFINE_integer(
+    "restore_checkpoint_step", 0, "Checkpoint step to warm-start from; 0 uses the latest checkpoint."
+)
+flags.DEFINE_string(
+    "legacy_replay_path", None, "Optional directory containing legacy online transition pickle files."
+)
+flags.DEFINE_boolean(
+    "migrate_legacy_data", False, "Migrate legacy last_action observations and smoothness rewards in memory."
+)
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
@@ -61,10 +73,74 @@ def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
 
 
+def clip_position_actions(action: np.ndarray, limit: float) -> np.ndarray:
+    """Limit only normalized Cartesian translation actions (dx, dy, dz)."""
+    clipped = np.asarray(action, dtype=np.float32).copy()
+    clipped[:3] = np.clip(clipped[:3], -limit, limit)
+    return clipped
+
+
+class ContinuousActionEMA:
+    """Light EMA filter for continuous arm actions; discrete gripper is untouched."""
+
+    def __init__(self, alpha: float, continuous_dims: int = 4):
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError(f"EMA alpha must be in (0, 1], got {alpha}")
+        self.alpha = alpha
+        self.continuous_dims = continuous_dims
+        self.previous = np.zeros(continuous_dims, dtype=np.float32)
+
+    def reset(self):
+        self.previous.fill(0.0)
+
+    def __call__(self, action: np.ndarray) -> np.ndarray:
+        filtered = np.asarray(action, dtype=np.float32).copy()
+        current = filtered[: self.continuous_dims]
+        current = self.alpha * current + (1.0 - self.alpha) * self.previous
+        filtered[: self.continuous_dims] = current
+        self.previous = current.copy()
+        return filtered
+
+    def sync(self, executed_action: np.ndarray):
+        """Synchronize after an intervention bypasses the policy filter."""
+        self.previous = np.asarray(executed_action, dtype=np.float32)[
+            : self.continuous_dims
+        ].copy()
+
+
+def migrate_legacy_transitions(transitions, previous_action=None):
+    """Convert legacy last_action observations and rewards to the current MDP in memory."""
+    migrated = 0
+    for transition in transitions:
+        action = np.asarray(transition["actions"], dtype=np.float32)
+        obs_state = transition["observations"]["state"]
+        next_obs_state = transition["next_observations"]["state"]
+        if obs_state.shape[-1] < 6 or next_obs_state.shape[-1] < 6:
+            raise ValueError(
+                "Legacy transition state must contain last_action at indices [1:6]."
+            )
+
+        obs_state[..., 1:6] = 0.0 if previous_action is None else previous_action
+        next_obs_state[..., 1:6] = action
+
+        success = float(transition["rewards"] >= 0.5)
+        if previous_action is None:
+            smoothness_penalty = 0.0
+        else:
+            action_diff = action[:4] - previous_action[:4]
+            smoothness_penalty = 0.01 * float(np.mean(action_diff ** 2))
+        transition["rewards"] = success - smoothness_penalty
+
+        previous_action = None if transition["dones"] else action.copy()
+        migrated += 1
+
+    return previous_action, migrated
+
+
 ##############################################################################
 
 
-def actor(agent, data_store, intvn_data_store, env, sampling_rng):
+def actor(agent, data_store, intvn_data_store, env, sampling_rng, training_start_step=0):
     """
     This is the actor loop, which runs when "--actor" is set to True.
     """
@@ -72,27 +148,32 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         success_counter = 0
         time_list = []
 
-        ckpt = checkpoints.restore_checkpoint(
-            os.path.abspath(FLAGS.checkpoint_path),
-            agent.state,
-            step=FLAGS.eval_checkpoint_step,
-        )
-        agent = agent.replace(state=ckpt)
-
         for episode in range(FLAGS.eval_n_trajs):
+            action_filter = ContinuousActionEMA(config.action_filter_alpha)
             obs, _ = env.reset()
+            action_filter.reset()
             done = False
             start_time = time.time()
             while not done:
                 sampling_rng, key = jax.random.split(sampling_rng)
-                actions = agent.sample_actions(
+                policy_actions = agent.sample_actions(
                     observations=jax.device_put(obs),
                     argmax=False,
                     seed=key
                 )
-                actions = np.asarray(jax.device_get(actions))
+                policy_actions = np.asarray(jax.device_get(policy_actions))
+                policy_actions = clip_position_actions(
+                    policy_actions, config.POSITION_ACTION_LIMIT
+                )
+                executed_actions = action_filter(policy_actions)
 
-                next_obs, reward, done, truncated, info = env.step(actions)
+                next_obs, reward, done, truncated, info = env.step(executed_actions)
+                if "intervene_action" in info:
+                    action_filter.sync(
+                        clip_position_actions(
+                            info["intervene_action"], config.POSITION_ACTION_LIMIT
+                        )
+                    )
                 obs = next_obs
 
                 if done:
@@ -109,10 +190,13 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         print(f"average time: {np.mean(time_list)}")
         return  # after done eval, return and exit
     
+    buffer_files = natsorted(
+        glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl"))
+    )
     start_step = (
-        int(os.path.basename(natsorted(glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")))[-1])[12:-4]) + 1
-        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
-        else 0
+        int(os.path.basename(buffer_files[-1])[12:-4]) + 1
+        if buffer_files
+        else training_start_step
     )
 
     datastore_dict = {
@@ -139,7 +223,9 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
     transitions = []
     demo_transitions = []
 
+    action_filter = ContinuousActionEMA(config.action_filter_alpha)
     obs, _ = env.reset()
+    action_filter.reset()
     done = False
 
     # training loop
@@ -155,20 +241,31 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
 
         with timer.context("sample_actions"):
             if step < config.random_steps:
-                actions = env.action_space.sample()
+                policy_actions = env.action_space.sample()
             else:
                 sampling_rng, key = jax.random.split(sampling_rng)
-                actions = agent.sample_actions(
+                policy_actions = agent.sample_actions(
                     observations=jax.device_put(obs),
                     seed=key,
                     argmax=False,
                 )
-                actions = np.asarray(jax.device_get(actions))
+                policy_actions = np.asarray(jax.device_get(policy_actions))
+
+            # Keep replay and execution consistent: constrain only dx/dy/dz
+            # before the EMA filter. drz and the discrete gripper are unchanged.
+            policy_actions = clip_position_actions(
+                policy_actions, config.POSITION_ACTION_LIMIT
+            )
+
+            # EMA belongs to the environment/control response. Replay keeps the
+            # constrained policy action so SAC trains Q(s, a) on the same action
+            # that the actor emits. The executed action is in next_observations.last_action.
+            executed_actions = action_filter(policy_actions)
 
         # Step environment
         with timer.context("step_env"):
 
-            next_obs, reward, done, truncated, info = env.step(actions)
+            next_obs, reward, done, truncated, info = env.step(executed_actions)
             if "left" in info:
                 info.pop("left")
             if "right" in info:
@@ -176,18 +273,22 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
 
             # override the action with the intervention action
             if "intervene_action" in info:
-                actions = info.pop("intervene_action")
+                buffer_actions = clip_position_actions(
+                    info.pop("intervene_action"), config.POSITION_ACTION_LIMIT
+                )
+                action_filter.sync(buffer_actions)
                 intervention_steps += 1
                 if not already_intervened:
                     intervention_count += 1
                 already_intervened = True
             else:
+                buffer_actions = policy_actions
                 already_intervened = False
 
             running_return += reward
             transition = dict(
                 observations=obs,
-                actions=actions,
+                actions=buffer_actions,
                 next_observations=next_obs,
                 rewards=reward,
                 masks=1.0 - done,
@@ -214,6 +315,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 already_intervened = False
                 client.update()
                 obs, _ = env.reset()
+                action_filter.reset()
 
         if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
             # dump to pickle file
@@ -242,16 +344,18 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
 ##############################################################################
 
 
-def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
+def learner(
+    rng,
+    agent,
+    replay_buffer,
+    demo_buffer,
+    wandb_logger=None,
+    training_start_step=0,
+):
     """
     The learner loop, which runs when "--learner" is set to True.
     """
-    start_step = (
-        int(os.path.basename(checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path)))[11:])
-        + 1
-        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
-        else 0
-    )
+    start_step = training_start_step
     step = start_step
 
     def stats_callback(type: str, payload: dict) -> dict:
@@ -267,6 +371,10 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
     server.register_data_store("actor_env_intvn", demo_buffer)
     server.start(threaded=True)
 
+    # Let the actor use the warm-started policy while the learner waits for data.
+    server.publish_network(agent.state.params)
+    print_green("sent initial network to actor")
+
     # Loop to wait until replay_buffer is filled
     pbar = tqdm.tqdm(
         total=config.training_starts,
@@ -280,10 +388,6 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
         time.sleep(1)
     pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
     pbar.close()
-
-    # send the initial network to the actor
-    server.publish_network(agent.state.params)
-    print_green("sent initial network to actor")
 
     # 50/50 sampling from RLPD, half from demo and half from online experience
     replay_iterator = replay_buffer.get_iterator(
@@ -332,9 +436,16 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
             batch = next(replay_iterator)
             demo_batch = next(demo_iterator)
             batch = concat_batches(batch, demo_batch, axis=0)
+            warmup_steps = getattr(config, "critic_warmup_steps", 0)
+            in_critic_warmup = step < start_step + warmup_steps
+            update_networks = (
+                train_critic_networks_to_update
+                if in_critic_warmup
+                else train_networks_to_update
+            )
             agent, update_info = agent.update(
                 batch,
-                networks_to_update=train_networks_to_update,
+                networks_to_update=update_networks,
             )
         # publish the updated network
         if step > 0 and step % (config.steps_per_update) == 0:
@@ -416,17 +527,46 @@ def main(_):
         jax.tree.map(jnp.array, agent), sharding.replicate()
     )
 
-    if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
+    training_start_step = 0
+    current_checkpoint = (
+        checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
+        if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path)
+        else None
+    )
+    if current_checkpoint is not None:
         input("Checkpoint path already exists. Press Enter to resume training.")
+        current_step = FLAGS.eval_checkpoint_step or None
         ckpt = checkpoints.restore_checkpoint(
             os.path.abspath(FLAGS.checkpoint_path),
             agent.state,
+            step=current_step,
         )
         agent = agent.replace(state=ckpt)
-        ckpt_number = os.path.basename(
-            checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
-        )[11:]
+        ckpt_number = (
+            str(current_step)
+            if current_step is not None
+            else os.path.basename(current_checkpoint)[11:]
+        )
+        training_start_step = int(ckpt_number) + 1
         print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
+    elif FLAGS.restore_checkpoint_path is not None:
+        restore_step = FLAGS.restore_checkpoint_step or None
+        restore_dir = os.path.abspath(FLAGS.restore_checkpoint_path)
+        restored_path = checkpoints.latest_checkpoint(restore_dir)
+        if restored_path is None:
+            raise FileNotFoundError(f"No checkpoint found in {restore_dir}")
+        ckpt = checkpoints.restore_checkpoint(
+            restore_dir,
+            agent.state,
+            step=restore_step,
+        )
+        agent = agent.replace(state=ckpt)
+        if restore_step is None:
+            restore_step = int(os.path.basename(restored_path)[11:])
+        training_start_step = restore_step + 1
+        print_green(
+            f"Warm-started from {restore_dir} at step {restore_step}."
+        )
 
     def create_replay_buffer_and_wandb_logger():
         replay_buffer = MemoryEfficientReplayBufferDataStore(
@@ -459,12 +599,44 @@ def main(_):
         for path in FLAGS.demo_path:
             with open(path, "rb") as f:
                 transitions = pkl.load(f)
+                if FLAGS.migrate_legacy_data:
+                    _, count = migrate_legacy_transitions(transitions)
+                    print_green(f"Migrated {count} demo transitions from {path}")
                 for transition in transitions:
                     if 'infos' in transition and 'grasp_penalty' in transition['infos']:
                         transition['grasp_penalty'] = transition['infos']['grasp_penalty']
                     demo_buffer.insert(transition)
         print_green(f"demo buffer size: {len(demo_buffer)}")
         print_green(f"online buffer size: {len(replay_buffer)}")
+
+        if FLAGS.legacy_replay_path is not None:
+            all_legacy_files = natsorted(
+                glob.glob(os.path.join(FLAGS.legacy_replay_path, "transitions_*.pkl"))
+            )
+            # The replay buffer retains only its newest ``capacity`` samples.
+            # Load one extra chunk to preserve action continuity at the first
+            # retained chunk without reading tens of GB that would be overwritten.
+            chunk_size = max(1, config.buffer_period)
+            chunks_to_load = (
+                config.replay_buffer_capacity + chunk_size - 1
+            ) // chunk_size + 1
+            legacy_files = all_legacy_files[-chunks_to_load:]
+            previous_action = None
+            migrated_count = 0
+            for file in legacy_files:
+                with open(file, "rb") as f:
+                    transitions = pkl.load(f)
+                if FLAGS.migrate_legacy_data:
+                    previous_action, count = migrate_legacy_transitions(
+                        transitions, previous_action
+                    )
+                    migrated_count += count
+                for transition in transitions:
+                    replay_buffer.insert(transition)
+            print_green(
+                f"Loaded newest {len(legacy_files)}/{len(all_legacy_files)} legacy replay files; "
+                f"migrated {migrated_count} transitions; buffer size={len(replay_buffer)}"
+            )
 
         if FLAGS.checkpoint_path is not None and os.path.exists(
             os.path.join(FLAGS.checkpoint_path, "buffer")
@@ -500,6 +672,7 @@ def main(_):
             replay_buffer,
             demo_buffer=demo_buffer,
             wandb_logger=wandb_logger,
+            training_start_step=training_start_step,
         )
 
     elif FLAGS.actor:
@@ -515,6 +688,7 @@ def main(_):
             intvn_data_store,
             env,
             sampling_rng,
+            training_start_step=training_start_step,
         )
 
     else:

@@ -39,7 +39,12 @@ class RelativeFrame(gym.Wrapper):
     def step(self, action: np.ndarray):
         # action is assumed to be (x, y, z, rx, ry, rz, gripper)
         # Transform action from end-effector frame to base frame
-        transformed_action = self.transform_action(action)
+        # Keep the executed action in the policy/replay coordinate frame.  The
+        # wrapped robot env stores the transformed (base-frame) command in its
+        # ``last_action`` observation, which would otherwise give the policy a
+        # previous action with different semantics from replay ``actions``.
+        policy_action = np.asarray(action).copy()
+        transformed_action = self.transform_action(policy_action)
         obs, reward, done, truncated, info = self.env.step(transformed_action)
         info['original_state_obs'] = copy.deepcopy(obs['state'])
 
@@ -52,6 +57,8 @@ class RelativeFrame(gym.Wrapper):
 
         # Transform observation to spatial frame
         transformed_obs = self.transform_observation(obs)
+        if "last_action" in transformed_obs["state"]:
+            transformed_obs["state"]["last_action"] = policy_action
         return transformed_obs, reward, done, truncated, info
 
     def reset(self, **kwargs):
@@ -67,7 +74,12 @@ class RelativeFrame(gym.Wrapper):
             )
 
         # Transform observation to spatial frame
-        return self.transform_observation(obs), info
+        transformed_obs = self.transform_observation(obs)
+        if "last_action" in transformed_obs["state"]:
+            transformed_obs["state"]["last_action"] = np.zeros_like(
+                transformed_obs["state"]["last_action"]
+            )
+        return transformed_obs, info
 
     def transform_observation(self, obs):
         """

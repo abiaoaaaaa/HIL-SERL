@@ -104,7 +104,11 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     # [位置缩放(mm), 姿态缩放(rad), 夹爪缩放]
     # 每步最大位移 = 1.0 * ACTION_SCALE[0] ≈ 10mm
     # 每步最大旋转 = 1.0 * ACTION_SCALE[1] ≈ 0.05rad ≈ 2.86°
-    ACTION_SCALE = np.array([20.0, 0.05, 1.0])
+    # ACTION_SCALE = np.array([20.0, 0.05, 1.0])
+    ACTION_SCALE = np.array([10.0, 0.025, 1.0])
+    # 连续位移动作 dx/dy/dz 的归一化安全上限。drz 与夹爪不受此限制。
+    POSITION_ACTION_LIMIT = 0.1
+
 
     # ==================== State 归一化参数 ====================
     # 用于将不同量级的状态量归一化到相似范围
@@ -192,6 +196,11 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     HZ = 10
     VEL_RATIO = 50
     ACC_RATIO = 50
+    # 仅用于 reset / 回原位；不影响 RL step 的执行速度。
+    RESET_VEL_RATIO = 30
+    RESET_ACC_RATIO = 30
+    RESET_MOVLA_VEL = 60
+    RESET_MOVLA_ACC = 60
 
     # USB 复位模式
     AUTO_RESET_USB = False
@@ -221,6 +230,10 @@ class TrainConfig(DefaultTrainingConfig):
     batch_size = 256  # 从 256 → 128 (节省 ~5GB)
     max_steps = 1_000_000
     random_steps = 500
+    action_filter_alpha = 0.65  # 轻度EMA；仅过滤连续机械臂动作
+    # 与 MarvinUSBEnvConfig 保持一致，供 actor 在 EMA 前裁剪策略输出。
+    POSITION_ACTION_LIMIT = MarvinUSBEnvConfig.POSITION_ACTION_LIMIT
+    critic_warmup_steps = 2000  # MDP迁移后先校准critic，再恢复actor更新
 
     # ==================== Replay Buffer 配置 ====================
     # ⚠️ np.empty() 会在初始化时立即分配全部内存 (即使数据还未填充)
@@ -231,7 +244,7 @@ class TrainConfig(DefaultTrainingConfig):
     #   - 图像解码缓存: ~5GB
     #   - 系统 + 其他: ~10GB
     # 总计: ~39GB → 需要进一步优化
-    replay_buffer_capacity = 200000  # 从默认200000降低到10000 (足够训练)
+    replay_buffer_capacity = 20000  # 从默认200000降低到10000 (足够训练)
 
     # ==================== 算法参数 ====================
     agent = "drq"  # 使用DrQ算法
@@ -396,11 +409,9 @@ class TrainConfig(DefaultTrainingConfig):
                 print(f"[REWARD_DEBUG] state_flat length: {len(state_flat)}")
                 print(f"[REWARD_DEBUG] state_flat 完整值:\n  {state_flat}")
 
-                # 3. 按维度拆解（期望24维）
-                # ⚠️ 注意：gymnasium的flatten()函数会按照字母顺序排序keys！
-                # 实际顺序: gripper_pose(1) + tcp_force(3) + tcp_pose(6) + tcp_torque(3) + tcp_vel(6) + last_action(5) = 24维
-                # 不是我们指定的: tcp_pose + tcp_vel + tcp_force + tcp_torque + gripper_pose + last_action
-                print(f"\n[REWARD_DEBUG] 维度拆解 (期望24维，按字母序):")
+                # 3. 按维度拆解（24维，按字母序排列）
+                # 字母序: gripper_pose(1) + last_action(5) + tcp_force(3) + tcp_pose(6) + tcp_torque(3) + tcp_vel(6) = 24维
+                print(f"\n[REWARD_DEBUG] 维度拆解 (24维，按字母序):")
 
                 if len(state_flat) >= 1:
                     gripper = state_flat[0]
@@ -408,42 +419,41 @@ class TrainConfig(DefaultTrainingConfig):
                 else:
                     print(f"  [0]      gripper_pose: ❌ 缺失")
 
-                if len(state_flat) >= 4:
-                    tcp_force = state_flat[1:4]
-                    print(f"  [1:4]    tcp_force (3维): [{tcp_force[0]:.3f}, {tcp_force[1]:.3f}, {tcp_force[2]:.3f}]")
+                if len(state_flat) >= 6:
+                    last_action = state_flat[1:6]
+                    print(f"  [1:6]    last_action (5维): [dx={last_action[0]:.4f}, dy={last_action[1]:.4f}, dz={last_action[2]:.4f}, drz={last_action[3]:.4f}, gripper={last_action[4]:.4f}]")
                 else:
-                    print(f"  [1:4]    tcp_force: ❌ 缺失")
+                    print(f"  [1:6]    last_action: ❌ 缺失")
 
-                if len(state_flat) >= 10:
-                    tcp_pose = state_flat[4:10]
-                    print(f"  [4:10]   tcp_pose (6维): [{', '.join([f'{x:.4f}' for x in tcp_pose])}]")
+                if len(state_flat) >= 9:
+                    tcp_force = state_flat[6:9]
+                    print(f"  [6:9]    tcp_force (3维): [{tcp_force[0]:.3f}, {tcp_force[1]:.3f}, {tcp_force[2]:.3f}]")
+                else:
+                    print(f"  [6:9]    tcp_force: ❌ 缺失")
+
+                if len(state_flat) >= 15:
+                    tcp_pose = state_flat[9:15]
+                    print(f"  [9:15]   tcp_pose (6维): [{', '.join([f'{x:.4f}' for x in tcp_pose])}]")
                     print(f"           位置XYZ(m): [{tcp_pose[0]:.4f}, {tcp_pose[1]:.4f}, {tcp_pose[2]:.4f}]")
                     print(f"           位置XYZ(mm): [{tcp_pose[0]*1000:.1f}, {tcp_pose[1]*1000:.1f}, {tcp_pose[2]*1000:.1f}]")
                     print(f"           欧拉角(rad): [{tcp_pose[3]:.4f}, {tcp_pose[4]:.4f}, {tcp_pose[5]:.4f}]")
                     print(f"           欧拉角(度): [{jnp.rad2deg(tcp_pose[3]):.2f}, {jnp.rad2deg(tcp_pose[4]):.2f}, {jnp.rad2deg(tcp_pose[5]):.2f}]")
                 else:
-                    print(f"  [4:10]   tcp_pose: ❌ 缺失")
+                    print(f"  [9:15]   tcp_pose: ❌ 缺失")
 
-                if len(state_flat) >= 13:
-                    tcp_torque = state_flat[10:13]
-                    print(f"  [10:13]  tcp_torque (3维): [{tcp_torque[0]:.3f}, {tcp_torque[1]:.3f}, {tcp_torque[2]:.3f}]")
+                if len(state_flat) >= 18:
+                    tcp_torque = state_flat[15:18]
+                    print(f"  [15:18]  tcp_torque (3维): [{tcp_torque[0]:.3f}, {tcp_torque[1]:.3f}, {tcp_torque[2]:.3f}]")
                 else:
-                    print(f"  [10:13]  tcp_torque: ❌ 缺失")
+                    print(f"  [15:18]  tcp_torque: ❌ 缺失")
 
-                if len(state_flat) >= 19:
-                    tcp_vel = state_flat[13:19]
-                    print(f"  [13:19]  tcp_vel (6维): [{', '.join([f'{x:.4f}' for x in tcp_vel])}]")
+                if len(state_flat) >= 24:
+                    tcp_vel = state_flat[18:24]
+                    print(f"  [18:24]  tcp_vel (6维): [{', '.join([f'{x:.4f}' for x in tcp_vel])}]")
                     print(f"           线速度xyz(m/s): [{tcp_vel[0]:.4f}, {tcp_vel[1]:.4f}, {tcp_vel[2]:.4f}]")
                     print(f"           角速度xyz(rad/s): [{tcp_vel[3]:.4f}, {tcp_vel[4]:.4f}, {tcp_vel[5]:.4f}]")
                 else:
-                    print(f"  [13:19]  tcp_vel: ❌ 缺失")
-
-                if len(state_flat) >= 24:
-                    last_action = state_flat[19:24]
-                    print(f"  [19:24]  last_action (5维): [{', '.join([f'{x:.4f}' for x in last_action])}]")
-                    print(f"           [dx={last_action[0]:.4f}, dy={last_action[1]:.4f}, dz={last_action[2]:.4f}, drz={last_action[3]:.4f}, gripper={last_action[4]:.4f}]")
-                else:
-                    print(f"  [19:24]  last_action: ❌ 缺失")
+                    print(f"  [18:24]  tcp_vel: ❌ 缺失")
 
                 # 4. 获取分类器输出
                 classifier_logit = classifier_func(obs)
@@ -453,8 +463,7 @@ class TrainConfig(DefaultTrainingConfig):
                 print(f"  sigmoid: {sigmoid_val}")
 
                 # 5. 提取夹爪位置（根据实际维度）
-                # ⚠️ 注意：flatten按字母序排列，gripper_pose在索引[0]，不是[18]！
-                # 实际顺序: gripper_pose(1) + tcp_force(3) + tcp_pose(6) + tcp_torque(3) + tcp_vel(6)
+                # flatten按字母序排列: gripper_pose 在索引[0]
                 if len(state_flat) >= 1:
                     gripper_pose_val = float(state_flat[0])  # 字母序第一个
                 else:
@@ -468,25 +477,33 @@ class TrainConfig(DefaultTrainingConfig):
                 gripper_opened = gripper_pose_val > 0.5
                 base_reward = int(classifier_success and gripper_opened)
 
-                # 动作平滑度惩罚
+                # 动作平滑度惩罚。
+                # last_action 已由 RelativeFrame 保证为策略/replay 使用的末端坐标系
+                # 归一化动作。这里只约束连续机械臂动作，不把离散夹爪切换重复计入；
+                # 夹爪已有独立的 grasp_penalty 和 grasp critic。
                 smoothness_penalty = 0.0
-                if len(state_flat) >= 24:
-                    # last_action 在字母序最后: gripper(1) + tcp_force(3) + tcp_pose(6) + tcp_torque(3) + tcp_vel(6) + last_action(5) = 24维
-                    last_action = state_flat[19:24]  # [dx, dy, dz, drz, gripper]
+                if len(state_flat) >= 6:
+                    # last_action 在字母序第二位: gripper_pose(1) + last_action(5) + ... = 24维
+                    last_action = state_flat[1:6]  # [dx, dy, dz, drz, gripper]
                     if _last_action[0] is not None:
-                        action_diff = jnp.array(last_action) - jnp.array(_last_action[0])
-                        action_diff_norm = float(jnp.sqrt(jnp.sum(action_diff ** 2)))
-                        smoothness_penalty = 0.001 * action_diff_norm
+                        action_diff = (
+                            jnp.array(last_action[:4])
+                            - jnp.array(_last_action[0][:4])
+                        )
+                        # 四个连续动作都已归一化到 [-1, 1]。使用均方差后，
+                        # 最大惩罚仍为 0.04，但小抖动采用平滑的二次惩罚。
+                        action_diff_mse = float(jnp.mean(action_diff ** 2))
+                        smoothness_penalty = 0.01 * action_diff_mse
                         print(f"  last_action (t-1): [{', '.join([f'{x:.4f}' for x in _last_action[0]])}]")
                         print(f"  last_action (t):   [{', '.join([f'{x:.4f}' for x in last_action])}]")
                         print(f"  action_diff: [{', '.join([f'{x:.4f}' for x in action_diff])}]")
-                        print(f"  action_diff_norm: {action_diff_norm:.6f}")
+                        print(f"  action_diff_mse: {action_diff_mse:.6f}")
                     else:
                         print(f"  last_action (t-1): None (首步)")
                         print(f"  last_action (t):   [{', '.join([f'{x:.4f}' for x in last_action])}]")
                     _last_action[0] = last_action.copy()
                 else:
-                    print(f"  ❌ state_flat 维度不足24，无法提取 last_action")
+                    print(f"  ❌ state_flat 维度不足6，无法提取 last_action")
 
                 # 应用平滑度惩罚
                 # wrapper 已修复: done = done or (rew >= 0.5)，支持负奖励
@@ -501,7 +518,15 @@ class TrainConfig(DefaultTrainingConfig):
 
                 return final_reward
 
-            env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
+            def reset_reward_state():
+                # Episode 之间不能计算动作差分。
+                _last_action[0] = None
+
+            env = MultiCameraBinaryRewardClassifierWrapper(
+                env,
+                reward_func,
+                reward_reset_func=reset_reward_state,
+            )
             env = SpacemouseIntervention(env)
 
         # SpaceMouse人类干预（仅训练时，在最后应用）

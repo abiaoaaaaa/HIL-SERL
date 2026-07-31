@@ -39,10 +39,17 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
     which is not part of the observation space
     """
 
-    def __init__(self, env: Env, reward_classifier_func, target_hz = None):
+    def __init__(
+        self,
+        env: Env,
+        reward_classifier_func,
+        target_hz=None,
+        reward_reset_func=None,
+    ):
         super().__init__(env)
         self.reward_classifier_func = reward_classifier_func
         self.target_hz = target_hz
+        self.reward_reset_func = reward_reset_func
 
     def compute_reward(self, obs):
         if self.reward_classifier_func is not None:
@@ -63,6 +70,8 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         return obs, rew, done, truncated, info
 
     def reset(self, **kwargs):
+        if self.reward_reset_func is not None:
+            self.reward_reset_func()
         obs, info = self.env.reset(**kwargs)
         info['succeed'] = False
         return obs, info

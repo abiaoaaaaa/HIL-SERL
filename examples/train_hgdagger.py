@@ -32,8 +32,34 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 
+
+class ActionSmoother:
+    """EMA low-pass filter for action smoothing."""
+
+    def __init__(self, alpha: float = 0.0):
+        self.alpha = alpha
+        self.prev_action = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.alpha > 0 and self.alpha < 1
+
+    def reset(self):
+        self.prev_action = None
+
+    def __call__(self, action: np.ndarray) -> np.ndarray:
+        if not self.enabled:
+            return action
+        if self.prev_action is None:
+            self.prev_action = np.copy(action)
+            return action
+        self.prev_action = self.alpha * action + (1 - self.alpha) * self.prev_action
+        return self.prev_action.copy()
+
+
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("seed", 42, "Random seed.")
+flags.DEFINE_float("action_smooth_alpha", 0.0, "EMA alpha for action smoothing (0=off). Typical: 0.3-0.5")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
