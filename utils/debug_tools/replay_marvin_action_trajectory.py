@@ -11,8 +11,8 @@ the training environment.
 The executed pipeline is:
 
     sampled EE action -> continuous EMA -> RelativeFrame-equivalent transform
-    -> action-space clip -> two 50 ms substeps at HZ=10 -> 200 Hz Cartesian
-    streaming reference -> Marvin robot
+    -> action-space clip -> HZ-rate policy target -> 200 Hz Cartesian streaming
+    reference -> Marvin robot
 
 Ctrl+C uses MarvinEnv's registered emergency-stop handler.
 """
@@ -98,8 +98,8 @@ class StandaloneControlConfig(MarvinUSBEnvConfig):
     DISPLAY_IMAGE = False
 
     # Actor action scaling: [translation mm, rotation rad, gripper].
-    # At HZ=10 the program halves the first four dimensions into two substeps;
-    # the complete actor step still totals ACTION_SCALE.
+    # The full action updates one policy-rate target; the shared MarvinEnv
+    # streaming controller performs the 200 Hz interpolation.
     ACTION_SCALE = np.array([10.0, 0.05, 1.0], dtype=np.float64)
     HZ = 10
 
@@ -455,15 +455,27 @@ class NoObservationMarvinUSBEnv(MarvinUSBEnv):
         self, base_action: np.ndarray, transformed_unclipped: np.ndarray
     ):
         """Mirror MarvinEnv.step() control execution, omitting obs and reward."""
-        action = np.clip(
-            np.asarray(base_action, dtype=np.float32),
-            self.action_space.low,
-            self.action_space.high,
-        ).copy()
+        action = np.asarray(base_action, dtype=np.float32).copy()
+        position_limit = float(getattr(self.config, "POSITION_ACTION_LIMIT", 1.0))
+        max_translation_norm = np.sqrt(3.0) * position_limit
+        translation_norm = np.linalg.norm(action[:3])
+        if translation_norm > max_translation_norm:
+            action[:3] *= max_translation_norm / translation_norm
+        action[3:] = np.clip(
+            action[3:], self.action_space.low[3:], self.action_space.high[3:]
+        )
         self.last_action = action.copy()
         timing = {"0_start": time.time()}
 
-        if self.hz == 10:
+        if (
+            self.impedance_mode == "cartesian"
+            and getattr(self.config, "USE_STREAMING_CARTESIAN", True)
+        ):
+            self._execute_cartesian_stream_step(
+                action, transformed_unclipped, timing, gripper_action=action[4]
+            )
+            substeps = [action.copy()]
+        elif self.hz == 10:
             half_action = action.copy()
             half_action[:4] /= 2.0
             self._execute_sub_step(
@@ -705,11 +717,15 @@ def main() -> int:
     if args.dry_run:
         for step, raw_action in enumerate(actions):
             filtered = action_filter(raw_action)
-            substeps = (
-                [np.r_[filtered[:4] / 2.0, filtered[4]].tolist()] * 2
-                if config.HZ == 10
-                else [filtered.tolist()]
-            )
+            if (
+                config.IMPEDANCE_MODE == "cartesian"
+                and getattr(config, "USE_STREAMING_CARTESIAN", True)
+            ):
+                substeps = [filtered.tolist()]
+            elif config.HZ == 10:
+                substeps = [np.r_[filtered[:4] / 2.0, filtered[4]].tolist()] * 2
+            else:
+                substeps = [filtered.tolist()]
             payload["records"].append(
                 {
                     "step": step,

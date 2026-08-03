@@ -50,6 +50,9 @@ class DefaultMarvinEnvConfig:
     # 奖励判定阈值 [X, Y, Z, Roll, Pitch, Yaw]
     # 单位：毫米(位置), 度(姿态)
     REWARD_THRESHOLD: np.ndarray = np.array([10.0, 10.0, 10.0, 5.0, 5.0, 5.0])
+    # Some tasks replace pose reward/termination with an outer learned or human
+    # reward wrapper.  Those tasks must disable pose-based early termination.
+    TERMINATE_ON_POSE_SUCCESS: bool = True
 
     # ==================== 动作缩放参数 ====================
     # 参考 spacemouse_control: POS_SCALE=5.0mm, ROT_SCALE=0.015rad
@@ -121,6 +124,17 @@ class DefaultMarvinEnvConfig:
     # 速度和加速度百分比（范围0-100）
     VEL_RATIO: int = 10  # 速度百分比，10表示10%
     ACC_RATIO: int = 10  # 加速度百分比，10表示10%
+
+    # ==================== 流式笛卡尔参考控制 ====================
+    # 策略频率（HZ）只决定 action 更新频率；该内环以固定频率持续生成
+    # 笛卡尔参考位姿并逐点做 IK。它取代了 10 Hz action 被拆成两个 20 Hz
+    # 的独立 movLA 轨迹的旧执行方式。
+    USE_STREAMING_CARTESIAN: bool = True
+    STREAM_CONTROL_HZ: int = 200
+    STREAM_LINEAR_VEL_MM_S: float = 60.0
+    STREAM_LINEAR_ACC_MM_S2: float = 200.0
+    STREAM_YAW_VEL_DEG_S: float = 20.0
+    STREAM_YAW_ACC_DEG_S2: float = 120.0
 
     # ==================== 末端工具配置 ====================
     # 工具运动学参数 [X, Y, Z, Roll, Pitch, Yaw]

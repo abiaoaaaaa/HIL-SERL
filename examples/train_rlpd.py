@@ -49,6 +49,11 @@ flags.DEFINE_string(
 flags.DEFINE_integer(
     "restore_checkpoint_step", 0, "Checkpoint step to warm-start from; 0 uses the latest checkpoint."
 )
+flags.DEFINE_boolean(
+    "restore_weights_only",
+    False,
+    "Warm-start network parameters but keep freshly initialized optimizer state.",
+)
 flags.DEFINE_string(
     "legacy_replay_path", None, "Optional directory containing legacy online transition pickle files."
 )
@@ -108,11 +113,24 @@ class ContinuousActionEMA:
         ].copy()
 
 
-def migrate_legacy_transitions(transitions, previous_action=None):
-    """Convert legacy last_action observations and rewards to the current MDP in memory."""
+def migrate_legacy_transitions(
+    transitions,
+    previous_executed_action=None,
+    ema_alpha=0.65,
+):
+    """Convert legacy transitions to the current EMA-augmented MDP in memory.
+
+    Replay ``actions`` remain the policy actions emitted before EMA.  The
+    ``last_action`` observation must contain the command actually passed to the
+    wrapped environment, so legacy sequences are replayed through the same EMA
+    recurrence used by the actor.
+    """
+    if not 0.0 < ema_alpha <= 1.0:
+        raise ValueError(f"EMA alpha must be in (0, 1], got {ema_alpha}")
+
     migrated = 0
     for transition in transitions:
-        action = np.asarray(transition["actions"], dtype=np.float32)
+        policy_action = np.asarray(transition["actions"], dtype=np.float32)
         obs_state = transition["observations"]["state"]
         next_obs_state = transition["next_observations"]["state"]
         if obs_state.shape[-1] < 6 or next_obs_state.shape[-1] < 6:
@@ -120,21 +138,36 @@ def migrate_legacy_transitions(transitions, previous_action=None):
                 "Legacy transition state must contain last_action at indices [1:6]."
             )
 
-        obs_state[..., 1:6] = 0.0 if previous_action is None else previous_action
-        next_obs_state[..., 1:6] = action
+        episode_start = previous_executed_action is None
+        if episode_start:
+            previous_executed_action = np.zeros_like(policy_action)
+
+        executed_action = policy_action.copy()
+        executed_action[:4] = (
+            ema_alpha * policy_action[:4]
+            + (1.0 - ema_alpha) * previous_executed_action[:4]
+        )
+        # The gripper bypasses ContinuousActionEMA.
+        executed_action[4] = policy_action[4]
+
+        obs_state[..., 1:6] = previous_executed_action
+        next_obs_state[..., 1:6] = executed_action
 
         success = float(transition["rewards"] >= 0.5)
-        if previous_action is None:
-            smoothness_penalty = 0.0
-        else:
-            action_diff = action[:4] - previous_action[:4]
-            smoothness_penalty = 0.01 * float(np.mean(action_diff ** 2))
+        action_diff = executed_action[:4] - previous_executed_action[:4]
+        smoothness_penalty = (
+            0.0
+            if episode_start
+            else 0.01 * float(np.mean(action_diff ** 2))
+        )
         transition["rewards"] = success - smoothness_penalty
 
-        previous_action = None if transition["dones"] else action.copy()
+        previous_executed_action = (
+            None if transition["dones"] else executed_action.copy()
+        )
         migrated += 1
 
-    return previous_action, migrated
+    return previous_executed_action, migrated
 
 
 ##############################################################################
@@ -152,13 +185,13 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, training_start
             action_filter = ContinuousActionEMA(config.action_filter_alpha)
             obs, _ = env.reset()
             action_filter.reset()
-            done = False
+            episode_finished = False
             start_time = time.time()
-            while not done:
+            while not episode_finished:
                 sampling_rng, key = jax.random.split(sampling_rng)
                 policy_actions = agent.sample_actions(
                     observations=jax.device_put(obs),
-                    argmax=False,
+                    argmax=True,
                     seed=key
                 )
                 policy_actions = np.asarray(jax.device_get(policy_actions))
@@ -175,29 +208,38 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng, training_start
                         )
                     )
                 obs = next_obs
+                episode_finished = done or truncated
 
-                if done:
-                    if reward:
+                if episode_finished:
+                    succeeded = bool(info.get("succeed", reward >= 0.5))
+                    if succeeded:
                         dt = time.time() - start_time
                         time_list.append(dt)
                         print(dt)
 
-                    success_counter += reward
+                    success_counter += int(succeeded)
                     print(reward)
                     print(f"{success_counter}/{episode + 1}")
 
         print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
-        print(f"average time: {np.mean(time_list)}")
+        print(
+            f"average successful episode time: "
+            f"{np.mean(time_list) if time_list else float('nan')}"
+        )
         return  # after done eval, return and exit
     
     buffer_files = natsorted(
         glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl"))
     )
-    start_step = (
+    buffer_start_step = (
         int(os.path.basename(buffer_files[-1])[12:-4]) + 1
         if buffer_files
-        else training_start_step
+        else 0
     )
+    # Checkpoints and buffer chunks may be saved at different cadences (or the
+    # learner may continue updating while the actor is offline).  Never move
+    # the actor's global step backwards behind the restored network.
+    start_step = max(training_start_step, buffer_start_step)
 
     datastore_dict = {
         "actor_env": data_store,
@@ -534,7 +576,13 @@ def main(_):
         else None
     )
     if current_checkpoint is not None:
-        input("Checkpoint path already exists. Press Enter to resume training.")
+        if FLAGS.eval_checkpoint_step:
+            input(
+                "Real-robot evaluation will start after loading "
+                f"checkpoint_{FLAGS.eval_checkpoint_step}. Press Enter to continue."
+            )
+        else:
+            input("Checkpoint path already exists. Press Enter to resume training.")
         current_step = FLAGS.eval_checkpoint_step or None
         ckpt = checkpoints.restore_checkpoint(
             os.path.abspath(FLAGS.checkpoint_path),
@@ -555,17 +603,23 @@ def main(_):
         restored_path = checkpoints.latest_checkpoint(restore_dir)
         if restored_path is None:
             raise FileNotFoundError(f"No checkpoint found in {restore_dir}")
-        ckpt = checkpoints.restore_checkpoint(
+        restored_state = checkpoints.restore_checkpoint(
             restore_dir,
             agent.state,
             step=restore_step,
         )
-        agent = agent.replace(state=ckpt)
+        if FLAGS.restore_weights_only:
+            agent = agent.replace(
+                state=agent.state.replace(params=restored_state.params)
+            )
+        else:
+            agent = agent.replace(state=restored_state)
         if restore_step is None:
             restore_step = int(os.path.basename(restored_path)[11:])
         training_start_step = restore_step + 1
         print_green(
-            f"Warm-started from {restore_dir} at step {restore_step}."
+            f"Warm-started {'weights only' if FLAGS.restore_weights_only else 'full state'} "
+            f"from {restore_dir} at step {restore_step}."
         )
 
     def create_replay_buffer_and_wandb_logger():
@@ -600,7 +654,10 @@ def main(_):
             with open(path, "rb") as f:
                 transitions = pkl.load(f)
                 if FLAGS.migrate_legacy_data:
-                    _, count = migrate_legacy_transitions(transitions)
+                    _, count = migrate_legacy_transitions(
+                        transitions,
+                        ema_alpha=config.action_filter_alpha,
+                    )
                     print_green(f"Migrated {count} demo transitions from {path}")
                 for transition in transitions:
                     if 'infos' in transition and 'grasp_penalty' in transition['infos']:
@@ -628,7 +685,9 @@ def main(_):
                     transitions = pkl.load(f)
                 if FLAGS.migrate_legacy_data:
                     previous_action, count = migrate_legacy_transitions(
-                        transitions, previous_action
+                        transitions,
+                        previous_action,
+                        ema_alpha=config.action_filter_alpha,
                     )
                     migrated_count += count
                 for transition in transitions:

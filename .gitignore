@@ -60,9 +60,11 @@ models/
 *.npz
 *.npy
 examples/classifier_data/
-examples/demo_data/
+examples/demo_data/*
+!examples/demo_data/README.md
 data/
 datasets/
+utils/demo_image_exports/
 
 # Buffer 数据
 **/buffer/*.pkl

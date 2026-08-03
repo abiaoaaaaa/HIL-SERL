@@ -92,6 +92,9 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
 
     # 任务完成判定阈值
     REWARD_THRESHOLD = np.array([8.0, 8.0, 8.0, 5.0, 5.0, 5.0])
+    # USB 任务的成功由外层分类器/脚踏板 wrapper 判定。不要使用继承自
+    # DefaultMarvinEnvConfig 的通用 TARGET_POSE 提前终止 episode。
+    TERMINATE_ON_POSE_SUCCESS = False
 
     # ==================== 末端姿态锁定 ====================
     # 是否锁定末端姿态（True=始终使用 RESET_POSE 的姿态，忽略策略旋转输出）
@@ -102,12 +105,13 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     # ==================== 动作缩放 ====================
     # 参考 spacemouse_control: POS_SCALE=5.0mm, ROT_SCALE=0.015rad
     # [位置缩放(mm), 姿态缩放(rad), 夹爪缩放]
-    # 每步最大位移 = 1.0 * ACTION_SCALE[0] ≈ 10mm
-    # 每步最大旋转 = 1.0 * ACTION_SCALE[1] ≈ 0.05rad ≈ 2.86°
+    # POSITION_ACTION_LIMIT=1.0 时，每个 EE 平移轴的目标增量上限为 15mm；
+    # 三轴同时取极值时，平移向量模长上限为 sqrt(3)*15 ≈ 25.98mm。
+    # 每步最大旋转 = 1.0 * ACTION_SCALE[1] = 0.03rad ≈ 1.72°
+    ACTION_SCALE = np.array([15.0, 0.03, 1.0])
     # ACTION_SCALE = np.array([20.0, 0.05, 1.0])
-    ACTION_SCALE = np.array([10.0, 0.025, 1.0])
     # 连续位移动作 dx/dy/dz 的归一化安全上限。drz 与夹爪不受此限制。
-    POSITION_ACTION_LIMIT = 0.1
+    POSITION_ACTION_LIMIT = 1.0  # EE 坐标系每个平移轴的归一化限制
 
 
     # ==================== State 归一化参数 ====================
@@ -173,7 +177,7 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
 
     # 柔顺模式（RL训练时使用，X方向柔顺可推动）
     COMPLIANCE_PARAM = {
-        "K": np.array([6000.0, 6000.0, 6000.0, 600.0, 600.0, 600.0, 20.0]),
+        "K": np.array([4000.0, 6000.0, 6000.0, 600.0, 600.0, 600.0, 20.0]),
         "D": np.array([0.8, 0.8, 0.8, 0.4, 0.4, 0.4, 1.0]),
     }
     # 精密模式（reset/抓取移动时使用，高刚度抗下垂）
@@ -327,7 +331,11 @@ class TrainConfig(DefaultTrainingConfig):
 
         # 奖励分类器（仅在classifier=True时使用learned reward）
         # 注意：collect_classifier_data=True时不加载分类器wrapper（避免自动done）
-        if classifier:
+        # Learner uses fake_env only to construct spaces/replay buffers and
+        # never steps the environment.  Avoid loading the reward network or
+        # starting keyboard/SpaceMouse processes there; forking after JAX has
+        # initialized can deadlock.
+        if classifier and not fake_env:
             classifier_func = load_classifier_func(
                 key=jax.random.PRNGKey(0),
                 sample=env.observation_space.sample(),
@@ -530,7 +538,7 @@ class TrainConfig(DefaultTrainingConfig):
             env = SpacemouseIntervention(env)
 
         # SpaceMouse人类干预（仅训练时，在最后应用）
-        if not classifier:
+        if not classifier and not fake_env:
             env = SpacemouseIntervention(env)
 
         return env

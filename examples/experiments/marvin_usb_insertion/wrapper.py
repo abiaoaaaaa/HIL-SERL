@@ -107,6 +107,7 @@ class MarvinUSBEnv(MarvinEnv):
         self.curr_path_length = 0
         self.last_action = np.zeros(5, dtype=np.float32)
         self._update_currpos()
+        self._reset_stream_reference()
 
         print("[MarvinUSBEnv] 重置完成，开始episode\n")
 
@@ -302,6 +303,9 @@ class MarvinUSBEnv(MarvinEnv):
             time.sleep(0.2)
         else:
             print(f"[go_to_reset] ⚠️ 最终模式异常: state={cur_state}, imp_type={imp_type} (期望state=3, imp_type=2)")
+
+        self._update_currpos()
+        self._reset_stream_reference()
 
     def _auto_reset_usb(self):
         """自动USB抓取流程: 移动到USB上方 -> 下降 -> 夹取 -> 抬起 -> 移动到reset"""

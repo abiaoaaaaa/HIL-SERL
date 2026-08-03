@@ -4,6 +4,7 @@ import numpy as np
 import copy
 import pickle as pkl
 import datetime
+import json
 from absl import app, flags
 import time
 
@@ -66,6 +67,47 @@ def main(_):
     with open(file_name, "wb") as f:
         pkl.dump(transitions, f)
         print(f"saved {success_needed} demos to {file_name}")
+
+    # Keep training-condition metadata next to the pickle.  Historical demo
+    # files contain only transitions, which makes action/control semantics
+    # impossible to verify from the file itself.
+    robot_config = env.unwrapped.config
+    first_obs = transitions[0]["observations"]
+    metadata = {
+        "schema_version": 1,
+        "created_at": datetime.datetime.now().astimezone().isoformat(),
+        "experiment": FLAGS.exp_name,
+        "successful_episodes": success_count,
+        "transition_count": len(transitions),
+        "action_shape": list(np.asarray(transitions[0]["actions"]).shape),
+        "state_shape": list(np.asarray(first_obs["state"]).shape),
+        "image_shapes": {
+            key: list(np.asarray(value).shape)
+            for key, value in first_obs.items()
+            if key != "state"
+        },
+        "control": {
+            "robot_ip": robot_config.ROBOT_IP,
+            "arm": robot_config.ARM,
+            "impedance_mode": robot_config.IMPEDANCE_MODE,
+            "action_scale": np.asarray(robot_config.ACTION_SCALE).tolist(),
+            "position_action_limit": float(robot_config.POSITION_ACTION_LIMIT),
+            "policy_hz": int(robot_config.HZ),
+            "stream_control_hz": int(robot_config.STREAM_CONTROL_HZ),
+            "stream_linear_velocity_mm_s": float(robot_config.STREAM_LINEAR_VEL_MM_S),
+            "stream_linear_acceleration_mm_s2": float(robot_config.STREAM_LINEAR_ACC_MM_S2),
+            "stream_yaw_velocity_deg_s": float(robot_config.STREAM_YAW_VEL_DEG_S),
+            "stream_yaw_acceleration_deg_s2": float(robot_config.STREAM_YAW_ACC_DEG_S2),
+            "compliance_k": np.asarray(robot_config.COMPLIANCE_PARAM["K"]).tolist(),
+            "compliance_d": np.asarray(robot_config.COMPLIANCE_PARAM["D"]).tolist(),
+            "max_episode_length": int(robot_config.MAX_EPISODE_LENGTH),
+        },
+    }
+    metadata_path = file_name + ".metadata.json"
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print(f"saved demo metadata to {metadata_path}")
 
 if __name__ == "__main__":
     app.run(main)

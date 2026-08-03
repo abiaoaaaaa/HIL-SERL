@@ -30,7 +30,7 @@ if sdk_path not in sys.path:
     sys.path.insert(0, sdk_path)
 
 from fx_robot import Marvin_Robot, DCSS
-from fx_kine import Marvin_Kine
+from fx_kine import Marvin_Kine, FX_InvKineSolvePara
 
 # 导入相机模块（复用FrankaEnv的相机实现）
 from franka_env.camera.video_capture import VideoCapture
@@ -902,6 +902,213 @@ class MarvinEnv(gym.Env):
         return resampled
 
     # ==========================================================================
+    # 流式笛卡尔参考（策略低频，机器人内环高频）
+    # ==========================================================================
+
+    def _reset_stream_reference(self):
+        """将流式参考状态与机器人当前测量状态对齐。
+
+        必须在 reset、急停恢复、位置模式移动后调用，避免柔顺模式重新进入时
+        使用旧 episode 的参考位姿或速度。
+        """
+        self._stream_ref_xyzabc = self.currpos_xyzabc.copy()
+        self._stream_ref_xyzabc[3] = self._RESET_POSE[3]
+        self._stream_ref_xyzabc[4] = self._RESET_POSE[4]
+        self._stream_linear_velocity = np.zeros(3, dtype=np.float64)
+        self._stream_yaw_velocity = 0.0
+        self._stream_ref_joints = self.curr_joints.copy()
+
+    @staticmethod
+    def _step_vector_reference(position, velocity, goal, max_velocity, max_acceleration, dt):
+        """推进三维、速度和加速度均受限的参考位姿。"""
+        error = goal - position
+        distance = np.linalg.norm(error)
+        if distance < 1e-9:
+            desired_velocity = np.zeros(3, dtype=np.float64)
+        else:
+            # 根据剩余距离限制速度，确保有足够距离平滑刹停。
+            stopping_speed = np.sqrt(2.0 * max_acceleration * distance)
+            desired_speed = min(max_velocity, stopping_speed)
+            desired_velocity = error * (desired_speed / distance)
+
+        delta_velocity = desired_velocity - velocity
+        delta_norm = np.linalg.norm(delta_velocity)
+        max_delta = max_acceleration * dt
+        if delta_norm > max_delta:
+            delta_velocity *= max_delta / delta_norm
+        velocity = velocity + delta_velocity
+
+        next_position = position + velocity * dt
+        if np.dot(goal - position, goal - next_position) <= 0.0:
+            return goal.copy(), np.zeros(3, dtype=np.float64)
+        return next_position, velocity
+
+    @staticmethod
+    def _step_scalar_reference(position, velocity, goal, max_velocity, max_acceleration, dt):
+        """推进单轴（末端 C/Yaw）流式参考。"""
+        error = goal - position
+        if abs(error) < 1e-9:
+            desired_velocity = 0.0
+        else:
+            stopping_speed = np.sqrt(2.0 * max_acceleration * abs(error))
+            desired_velocity = np.copysign(min(max_velocity, stopping_speed), error)
+
+        velocity += np.clip(
+            desired_velocity - velocity,
+            -max_acceleration * dt,
+            max_acceleration * dt,
+        )
+        next_position = position + velocity * dt
+        if (goal - position) * (goal - next_position) <= 0.0:
+            return float(goal), 0.0
+        return float(next_position), float(velocity)
+
+    def _stream_ik(self, xyzabc: np.ndarray):
+        """对单个流式参考位姿求 IK，并保持与上一帧相同的关节构型。"""
+        ik_input = FX_InvKineSolvePara()
+        pose_matrix = self.kk.xyzabc_to_mat4x4(xyzabc.tolist())
+        if not pose_matrix:
+            return None
+        ik_input.set_all_inputs(
+            target_tcp=self.kk.mat4x4_to_mat1x16(pose_matrix),
+            ref_joint=self._stream_ref_joints.tolist(),
+            zsp_type=0,
+            zsp_para=[0.0] * 6,
+            zsp_angle=0.0,
+        )
+        result = self.kk.ik(ik_input)
+        if not result:
+            return None
+        return np.asarray(result.get_output_ret_joint(), dtype=np.float64)
+
+    def _execute_cartesian_stream_step(self, action, raw_action, t, gripper_action):
+        """在完整策略周期内执行 200 Hz 的状态化笛卡尔参考流。
+
+        一个策略 action 只更新一次目标。内环保留上一帧参考速度和 IK 解，
+        因此不会像两段 movLA 那样在每 50 ms 重新起停。
+        """
+        step_start = time.monotonic()
+        self._update_currpos()
+        t["1_update_currpos"] = time.time()
+        current_xyzabc = self.currpos_xyzabc.copy()
+
+        if not hasattr(self, "_stream_ref_xyzabc"):
+            self._reset_stream_reference()
+
+        pos_delta_mm = action[:3] * self.action_scale[0]
+        action_rot_rad = np.zeros(3, dtype=np.float64)
+        if not getattr(self.config, "FIXED_ORIENTATION", False):
+            action_rot_rad[2] = action[3] * self.action_scale[1]
+
+        target_xyzabc = current_xyzabc.copy()
+        target_xyzabc[:3] += pos_delta_mm
+        target_xyzabc[3:] += np.rad2deg(action_rot_rad)
+        target_xyzabc[3] = self._RESET_POSE[3]
+        target_xyzabc[4] = self._RESET_POSE[4]
+        target_xyzabc = self.clip_safety_box(target_xyzabc)
+        self.nextpos = np.concatenate([
+            target_xyzabc[:3] / 1000.0,
+            _euler_to_quat(np.deg2rad(target_xyzabc[3:])),
+        ])
+
+        stream_hz = int(getattr(self.config, "STREAM_CONTROL_HZ", 200))
+        if stream_hz <= 0:
+            raise ValueError("STREAM_CONTROL_HZ must be positive")
+        period = 1.0 / stream_hz
+        duration = 1.0 / self.hz
+        sample_count = max(1, round(stream_hz * duration))
+        linear_velocity = float(getattr(self.config, "STREAM_LINEAR_VEL_MM_S", 60.0))
+        linear_acceleration = float(getattr(self.config, "STREAM_LINEAR_ACC_MM_S2", 200.0))
+        yaw_velocity = float(getattr(self.config, "STREAM_YAW_VEL_DEG_S", 20.0))
+        yaw_acceleration = float(getattr(self.config, "STREAM_YAW_ACC_DEG_S2", 120.0))
+
+        t["2a_recover"] = time.time()
+        send_start = time.monotonic()
+        missed_deadlines = 0
+        ik_failures = 0
+        sent_points = 0
+        for index in range(sample_count):
+            self._stream_ref_xyzabc[:3], self._stream_linear_velocity = (
+                self._step_vector_reference(
+                    self._stream_ref_xyzabc[:3],
+                    self._stream_linear_velocity,
+                    target_xyzabc[:3],
+                    linear_velocity,
+                    linear_acceleration,
+                    period,
+                )
+            )
+            self._stream_ref_xyzabc[5], self._stream_yaw_velocity = (
+                self._step_scalar_reference(
+                    self._stream_ref_xyzabc[5],
+                    self._stream_yaw_velocity,
+                    target_xyzabc[5],
+                    yaw_velocity,
+                    yaw_acceleration,
+                    period,
+                )
+            )
+            self._stream_ref_xyzabc[3:5] = self._RESET_POSE[3:5]
+
+            joint_reference = self._stream_ik(self._stream_ref_xyzabc)
+            if joint_reference is None:
+                ik_failures += 1
+                # 不发送未知构型；回到当前实测状态后在下一帧重新尝试。
+                self._stream_ref_xyzabc = current_xyzabc.copy()
+                self._stream_ref_xyzabc[3:5] = self._RESET_POSE[3:5]
+                self._stream_ref_joints = self.curr_joints.copy()
+                self._stream_linear_velocity.fill(0.0)
+                self._stream_yaw_velocity = 0.0
+            else:
+                self._stream_ref_joints = joint_reference
+                self.robot.clear_set()
+                self.robot.set_joint_cmd_pose(arm=self.arm, joints=joint_reference)
+                self.robot.send_cmd()
+                sent_points += 1
+
+            if index + 1 < sample_count:
+                deadline = send_start + (index + 1) * period
+                sleep_seconds = deadline - time.monotonic()
+                if sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+                else:
+                    missed_deadlines += 1
+
+        t["2b_movLA"] = time.time()  # 保留键名以兼容既有 timing 日志。
+        t["2c_send_joints"] = time.time()
+        t["2d_mode_check"] = time.time()
+
+        self._send_gripper_command(gripper_action)
+        t["3_gripper"] = time.time()
+
+        remaining = duration - (time.monotonic() - step_start)
+        if remaining > 0:
+            time.sleep(remaining)
+        t["4_sleep"] = time.time()
+
+        elapsed_ms = (time.monotonic() - send_start) * 1000.0
+        t.setdefault("stream_substeps", []).append({
+            "send_frequency_hz": stream_hz,
+            "sent_point_count": sent_points,
+            "requested_point_count": sample_count,
+            "linear_velocity_limit_mm_s": linear_velocity,
+            "linear_acceleration_limit_mm_s2": linear_acceleration,
+            "yaw_velocity_limit_deg_s": yaw_velocity,
+            "yaw_acceleration_limit_deg_s2": yaw_acceleration,
+            "send_elapsed_seconds": elapsed_ms / 1000.0,
+            "ik_failures": ik_failures,
+            "missed_deadlines": missed_deadlines,
+        })
+        print(
+            f"[step={self.curr_path_length}][笛卡尔流式] "
+            f"target_delta={np.linalg.norm(pos_delta_mm):.3f}mm, "
+            f"sent={sent_points}/{sample_count} @ {stream_hz}Hz, "
+            f"ik_failures={ik_failures}, missed_deadlines={missed_deadlines}"
+        )
+        self.last_joints = self.curr_joints.copy()
+        self.curr_path_length += 1
+
+    # ==========================================================================
     # Gym step 接口 (参考 spacemouse_control 的控制逻辑)
     # ==========================================================================
 
@@ -912,13 +1119,9 @@ class MarvinEnv(gym.Env):
         action 已经过 RelativeFrame 变换（从EE系到基座系），
         单位约定: [:3] Δ位姿(m), [3:6] Δ旋转(rad), [6] 夹爪
 
-        ⚠️ 关节阻抗模式下的动作映射:
-        - 笛卡尔阻抗: 直接使用movLA规划笛卡尔空间轨迹
-        - 关节阻抗: 通过IK将笛卡尔增量转为关节角度增量，直接发送关节指令
-
-        🔧 折衷方案 (10Hz 分两次执行):
-        - 如果 self.hz == 10: 内部执行两次 50ms 子步骤
-        - 如果 self.hz == 20: 直接执行一次 50ms
+        笛卡尔阻抗默认使用状态化流式参考：策略按 ``HZ`` 更新 action，
+        机器人以 ``STREAM_CONTROL_HZ`` 执行内环。关节阻抗继续保持原有的
+        分段 movLA 路径，以避免改变其已有行为。
 
         Returns:
             (observation, reward, done, truncated, info)
@@ -930,19 +1133,39 @@ class MarvinEnv(gym.Env):
         t = {"0_start": time.time()}
 
         # 保存原始 action 用于调试
-        raw_action = action.copy()
-        action = np.clip(action, self.action_space.low, self.action_space.high).copy()
-        # Final execution-side guard: applies to policy and intervention actions.
-        # Only Cartesian translation (dx, dy, dz) is constrained; rotation and
-        # gripper semantics remain unchanged.
+        raw_action = np.asarray(action, dtype=np.float32).copy()
+        action = raw_action.copy()
+        # RelativeFrame has already rotated translation from EE to base frame.
+        # Component-wise clipping here would not be rotation invariant: a valid
+        # EE-frame vector can have a base-frame component larger than the
+        # original per-axis limit. Preserve its direction and only bound its
+        # Euclidean norm to the largest vector allowed by three per-axis limits.
         position_limit = getattr(self.config, "POSITION_ACTION_LIMIT", 1.0)
-        action[:3] = np.clip(action[:3], -position_limit, position_limit)
+        max_translation_norm = np.sqrt(3.0) * float(position_limit)
+        translation_norm = np.linalg.norm(action[:3])
+        if translation_norm > max_translation_norm:
+            action[:3] *= max_translation_norm / translation_norm
+        # drz and gripper do not undergo the translation guard, but still obey
+        # their normalized action-space range.
+        action[3:] = np.clip(
+            action[3:], self.action_space.low[3:], self.action_space.high[3:]
+        )
+        previous_action = self.last_action.copy()
         print(f"[STEP_DEBUG step={self.curr_path_length}] 原始动作: {raw_action}, 裁剪后动作: {action}")
         # 保存当前动作到观测中（供下一步使用）
         self.last_action = action.copy()
 
-        # 🔧 10Hz 折衷方案: 分两次执行
-        if self.hz == 10:
+        if (
+            self.impedance_mode == 'cartesian'
+            and getattr(self.config, "USE_STREAMING_CARTESIAN", True)
+        ):
+            # 一个完整策略 action 对应一个连续的 1/HZ 流式执行窗口；
+            # 不再拆成两条互相独立的 50 ms movLA 轨迹。
+            self._execute_cartesian_stream_step(
+                action, raw_action, t, gripper_action=action[4]
+            )
+        # 关节阻抗保留原先的 10 Hz -> 两个 50 ms 分段逻辑。
+        elif self.hz == 10:
             # 位置和旋转动作分两次执行，夹爪动作保持完整
             half_action = action.copy()
             half_action[:4] = action[:4] / 2.0  # 只分割位置和旋转 [dx,dy,dz,dry]
@@ -979,9 +1202,14 @@ class MarvinEnv(gym.Env):
         print(f"[ACTION_DEBUG step={self.curr_path_length}] action={np.array2string(action, precision=4, suppress_small=True)} "
               f"[dx={action[0]:.4f}, dy={action[1]:.4f}, dz={action[2]:.4f}, drz={action[3]:.4f}, gripper={action[4]:.4f}]")
 
-        reward = self.compute_reward(obs, action)
+        reward = self.compute_reward(obs, action, previous_action=previous_action)
         t["5c_reward"] = time.time()
-        done = self.curr_path_length >= self.max_episode_length or reward > 0.9  # 任务完成
+        pose_success = reward > 0.9
+        horizon_reached = self.curr_path_length >= self.max_episode_length
+        done = horizon_reached or (
+            getattr(self.config, "TERMINATE_ON_POSE_SUCCESS", True)
+            and pose_success
+        )
 
         if self.curr_path_length % 10 == 0 or done:
             current_pose = obs["state"]["tcp_pose"]
@@ -1018,12 +1246,12 @@ class MarvinEnv(gym.Env):
 
         # ==================== 音频提示 ====================
         if done:
-            if reward:  # 任务成功
+            if pose_success and not horizon_reached:
                 self.audio_notifier.play_success(step=self.curr_path_length)
-            else:  # 任务失败（超时）
+            elif horizon_reached:
                 self.audio_notifier.play_failure(reason="timeout")
 
-        return obs, int(reward), done, False, {"succeed": reward}
+        return obs, float(reward), done, False, {"succeed": pose_success}
 
     def _execute_sub_step(self, action: np.ndarray, raw_action: np.ndarray, t: dict, sub_step: int, gripper_action: float):
         """
@@ -1241,7 +1469,7 @@ class MarvinEnv(gym.Env):
     # 奖励计算 (统一使用 scipy 标准转换)
     # ==========================================================================
 
-    def compute_reward(self, obs, action) -> float:
+    def compute_reward(self, obs, action, previous_action=None) -> float:
         """
         计算奖励，包含任务完成判断和动作平滑惩罚。
 
@@ -1270,7 +1498,9 @@ class MarvinEnv(gym.Env):
         )
 
         # 动作平滑惩罚：只对位置+旋转计算（不包括夹爪 action[4]）
-        action_diff = action[:4] - self.last_action[:4]  # [dx, dy, dz, dry]
+        if previous_action is None:
+            previous_action = np.zeros_like(action)
+        action_diff = action[:4] - previous_action[:4]  # [dx, dy, dz, dry]
         action_penalty = 0.05 * np.sum(action_diff ** 2)  # λ=0.05, L2平方
 
         # 返回 reward
@@ -1415,6 +1645,7 @@ class MarvinEnv(gym.Env):
         self.curr_path_length = 0
         self.last_action = np.zeros(5, dtype=np.float32)
         self._update_currpos()
+        self._reset_stream_reference()
 
         print("[MarvinEnv] 重置完成\n")
 
@@ -1472,6 +1703,7 @@ class MarvinEnv(gym.Env):
         self._switch_to_compliance_mode()
 
         self._update_currpos()
+        self._reset_stream_reference()
         print("[MarvinEnv] go_to_reset完成")
 
     def save_video_recording(self):
