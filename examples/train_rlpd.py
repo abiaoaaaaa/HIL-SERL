@@ -529,6 +529,17 @@ def main(_):
     env = RecordEpisodeStatistics(env)
 
     rng, sampling_rng = jax.random.split(rng)
+    image_augmentation_mode = getattr(config, "image_augmentation_mode", "drq")
+    actor_hidden_dims = getattr(config, "actor_hidden_dims", (256, 256))
+    critic_hidden_dims = getattr(config, "critic_hidden_dims", (256, 256))
+    grasp_critic_hidden_dims = getattr(config, "grasp_critic_hidden_dims", (256, 256))
+    if FLAGS.learner:
+        print_green(f"Image augmentation mode: {image_augmentation_mode}")
+        print_green(
+            "Network hidden dims: "
+            f"actor={actor_hidden_dims}, critic={critic_hidden_dims}, "
+            f"grasp_critic={grasp_critic_hidden_dims}"
+        )
     
     if config.setup_mode == 'single-arm-fixed-gripper' or config.setup_mode == 'dual-arm-fixed-gripper':   
         agent: SACAgent = make_sac_pixel_agent(
@@ -538,6 +549,9 @@ def main(_):
             image_keys=config.image_keys,
             encoder_type=config.encoder_type,
             discount=config.discount,
+            image_augmentation_mode=image_augmentation_mode,
+            actor_hidden_dims=actor_hidden_dims,
+            critic_hidden_dims=critic_hidden_dims,
         )
         include_grasp_penalty = False
     elif config.setup_mode == 'single-arm-learned-gripper':
@@ -548,6 +562,10 @@ def main(_):
             image_keys=config.image_keys,
             encoder_type=config.encoder_type,
             discount=config.discount,
+            image_augmentation_mode=image_augmentation_mode,
+            actor_hidden_dims=actor_hidden_dims,
+            critic_hidden_dims=critic_hidden_dims,
+            grasp_critic_hidden_dims=grasp_critic_hidden_dims,
         )
         include_grasp_penalty = True
     elif config.setup_mode == 'dual-arm-learned-gripper':
@@ -558,6 +576,10 @@ def main(_):
             image_keys=config.image_keys,
             encoder_type=config.encoder_type,
             discount=config.discount,
+            image_augmentation_mode=image_augmentation_mode,
+            actor_hidden_dims=actor_hidden_dims,
+            critic_hidden_dims=critic_hidden_dims,
+            grasp_critic_hidden_dims=grasp_critic_hidden_dims,
         )
         include_grasp_penalty = True
     else:

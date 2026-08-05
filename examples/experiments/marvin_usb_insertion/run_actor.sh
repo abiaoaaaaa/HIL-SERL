@@ -8,18 +8,29 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.1
 export WANDB_MODE=disabled
 
-RUN_NAME="${RUN_NAME:-checkpoints_final_scale15_rot003_stream60_fresh}"
+RUN_NAME="${RUN_NAME:-checkpoints_scale15_rot003_stream60_256_medium_from392k}"
 RUN_DIR="${SCRIPT_DIR}/${RUN_NAME}"
-PRETRAIN_DIR="${PRETRAIN_DIR:-${SCRIPT_DIR}/checkpoints_scale10_rot0025_from124k}"
-PRETRAIN_STEP="${PRETRAIN_STEP:-266000}"
+PRETRAIN_DIR="${PRETRAIN_DIR:-${SCRIPT_DIR}/checkpoints_final_scale15_rot003_stream60_fresh}"
+PRETRAIN_STEP="${PRETRAIN_STEP:-0}"
 
+if [[ "${PRETRAIN_STEP}" == "0" ]]; then
+    LATEST_CHECKPOINT="$(
+        find "${PRETRAIN_DIR}" -maxdepth 1 -type d -name 'checkpoint_*' \
+            -printf '%f\n' | sort -V | tail -n 1
+    )"
+    if [[ -z "${LATEST_CHECKPOINT}" ]]; then
+        echo "No checkpoint found in ${PRETRAIN_DIR}" >&2
+        exit 1
+    fi
+    PRETRAIN_STEP="${LATEST_CHECKPOINT##*_}"
+fi
 if [[ ! -d "${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" ]]; then
-    echo "Pretrained checkpoint not found: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" >&2
+    echo "Checkpoint not found: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" >&2
     exit 1
 fi
 
 echo "[actor] output: ${RUN_DIR}"
-echo "[actor] warm start: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}"
+echo "[actor] warm start weights only: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}"
 
 python "${EXAMPLES_DIR}/train_rlpd.py" \
     --exp_name=marvin_usb_insertion \

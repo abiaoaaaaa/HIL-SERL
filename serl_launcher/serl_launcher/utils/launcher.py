@@ -12,7 +12,7 @@ from serl_launcher.agents.continuous.bc import BCAgent
 from serl_launcher.agents.continuous.sac import SACAgent
 from serl_launcher.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
 from serl_launcher.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
-from serl_launcher.vision.data_augmentations import batched_random_crop
+from serl_launcher.vision.data_augmentations import batched_image_augmentation
 
 ##############################################################################
 
@@ -22,7 +22,8 @@ def make_bc_agent(
     sample_obs, 
     sample_action, 
     image_keys=("image",), 
-    encoder_type="resnet-pretrained"
+    encoder_type="resnet-pretrained",
+    image_augmentation_mode="drq",
 ):
     return BCAgent.create(
         jax.random.PRNGKey(seed),
@@ -43,7 +44,7 @@ def make_bc_agent(
         use_proprio=True,
         encoder_type=encoder_type,
         image_keys=image_keys,
-        augmentation_function=make_batch_augmentation_func(image_keys),
+        augmentation_function=make_batch_augmentation_func(image_keys, image_augmentation_mode),
     )
 
 
@@ -56,6 +57,9 @@ def make_sac_pixel_agent(
     reward_bias=0.0,
     target_entropy=None,
     discount=0.97,
+    image_augmentation_mode="drq",
+    actor_hidden_dims=(256, 256),
+    critic_hidden_dims=(256, 256),
 ):
     agent = SACAgent.create_pixels(
         jax.random.PRNGKey(seed),
@@ -73,12 +77,12 @@ def make_sac_pixel_agent(
         critic_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": critic_hidden_dims,
         },
         policy_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": actor_hidden_dims,
         },
         temperature_init=1e-2,
         discount=discount,
@@ -87,7 +91,7 @@ def make_sac_pixel_agent(
         critic_subsample_size=None,
         reward_bias=reward_bias,
         target_entropy=target_entropy,
-        augmentation_function=make_batch_augmentation_func(image_keys),
+        augmentation_function=make_batch_augmentation_func(image_keys, image_augmentation_mode),
     )
     return agent
 
@@ -101,6 +105,10 @@ def make_sac_pixel_agent_hybrid_single_arm(
     reward_bias=0.0,
     target_entropy=None,
     discount=0.97,
+    image_augmentation_mode="drq",
+    actor_hidden_dims=(256, 256),
+    critic_hidden_dims=(256, 256),
+    grasp_critic_hidden_dims=(256, 256),
 ):
     agent = SACAgentHybridSingleArm.create_pixels(
         jax.random.PRNGKey(seed),
@@ -118,17 +126,17 @@ def make_sac_pixel_agent_hybrid_single_arm(
         critic_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": critic_hidden_dims,
         },
         grasp_critic_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": grasp_critic_hidden_dims,
         },
         policy_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": actor_hidden_dims,
         },
         temperature_init=1e-2,
         discount=discount,
@@ -137,7 +145,7 @@ def make_sac_pixel_agent_hybrid_single_arm(
         critic_subsample_size=None,
         reward_bias=reward_bias,
         target_entropy=target_entropy,
-        augmentation_function=make_batch_augmentation_func(image_keys),
+        augmentation_function=make_batch_augmentation_func(image_keys, image_augmentation_mode),
     )
     return agent
 
@@ -151,6 +159,10 @@ def make_sac_pixel_agent_hybrid_dual_arm(
     reward_bias=0.0,
     target_entropy=None,
     discount=0.97,
+    image_augmentation_mode="drq",
+    actor_hidden_dims=(256, 256),
+    critic_hidden_dims=(256, 256),
+    grasp_critic_hidden_dims=(256, 256),
 ):
     agent = SACAgentHybridDualArm.create_pixels(
         jax.random.PRNGKey(seed),
@@ -168,17 +180,17 @@ def make_sac_pixel_agent_hybrid_dual_arm(
         critic_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": critic_hidden_dims,
         },
         grasp_critic_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": grasp_critic_hidden_dims,
         },
         policy_network_kwargs={
             "activations": nn.tanh,
             "use_layer_norm": True,
-            "hidden_dims": [256, 256],
+            "hidden_dims": actor_hidden_dims,
         },
         temperature_init=1e-2,
         discount=discount,
@@ -187,7 +199,7 @@ def make_sac_pixel_agent_hybrid_dual_arm(
         critic_subsample_size=None,
         reward_bias=reward_bias,
         target_entropy=target_entropy,
-        augmentation_function=make_batch_augmentation_func(image_keys),
+        augmentation_function=make_batch_augmentation_func(image_keys, image_augmentation_mode),
     )
     return agent
 
@@ -202,15 +214,17 @@ def linear_schedule(step):
     decayed_value = init_value + (end_value - init_value) * (linear_step / decay_steps)
     return decayed_value
     
-def make_batch_augmentation_func(image_keys) -> callable:
-
+def make_batch_augmentation_func(image_keys, mode="drq") -> callable:
     def data_augmentation_fn(rng, observations):
         for pixel_key in image_keys:
             observations = observations.copy(
                 add_or_replace={
-                    pixel_key: batched_random_crop(
-                        observations[pixel_key], rng, padding=4, num_batch_dims=2
-                    )
+                    pixel_key: batched_image_augmentation(
+                        observations[pixel_key],
+                        rng,
+                        mode=mode,
+                        num_batch_dims=2,
+                    ),
                 }
             )
         return observations

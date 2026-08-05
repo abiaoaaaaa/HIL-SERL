@@ -16,17 +16,15 @@ fi
 
 DEMO_PATH="$1"
 shift
-RUN_NAME="${RUN_NAME:-checkpoints_final_scale15_rot003_stream60_fresh}"
+RUN_NAME="${RUN_NAME:-checkpoints_scale15_rot003_stream60_256_medium_from392k}"
 RUN_DIR="${SCRIPT_DIR}/${RUN_NAME}"
-PRETRAIN_DIR="${PRETRAIN_DIR:-${SCRIPT_DIR}/checkpoints_scale10_rot0025_from124k}"
-PRETRAIN_STEP="${PRETRAIN_STEP:-266000}"
+# Warm-start model weights from the previous compatible 256x256 run. Only
+# network parameters are restored; optimizer and replay/demo buffers stay new.
+PRETRAIN_DIR="${PRETRAIN_DIR:-${SCRIPT_DIR}/checkpoints_final_scale15_rot003_stream60_fresh}"
+PRETRAIN_STEP="${PRETRAIN_STEP:-0}"
 
 if [[ ! -f "${DEMO_PATH}" ]]; then
     echo "Demo file not found: ${DEMO_PATH}" >&2
-    exit 1
-fi
-if [[ ! -d "${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" ]]; then
-    echo "Pretrained checkpoint not found: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" >&2
     exit 1
 fi
 if [[ -d "${RUN_DIR}/buffer" || -d "${RUN_DIR}/demo_buffer" ]] || \
@@ -39,9 +37,35 @@ if [[ -d "${RUN_DIR}/buffer" || -d "${RUN_DIR}/demo_buffer" ]] || \
 fi
 
 echo "[learner] output: ${RUN_DIR}"
-echo "[learner] warm start weights only: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}"
 echo "[learner] fresh demo: ${DEMO_PATH}"
 echo "[learner] old online/demo buffers: disabled"
+
+RESTORE_ARGS=()
+if [[ -n "${PRETRAIN_DIR}" ]]; then
+    if [[ "${PRETRAIN_STEP}" == "0" ]]; then
+        LATEST_CHECKPOINT="$(
+            find "${PRETRAIN_DIR}" -maxdepth 1 -type d -name 'checkpoint_*' \
+                -printf '%f\n' | sort -V | tail -n 1
+        )"
+        if [[ -z "${LATEST_CHECKPOINT}" ]]; then
+            echo "No checkpoint found in ${PRETRAIN_DIR}" >&2
+            exit 1
+        fi
+        PRETRAIN_STEP="${LATEST_CHECKPOINT##*_}"
+    fi
+    if [[ ! -d "${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" ]]; then
+        echo "Checkpoint not found: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}" >&2
+        exit 1
+    fi
+    RESTORE_ARGS+=(
+        --restore_checkpoint_path="${PRETRAIN_DIR}"
+        --restore_checkpoint_step="${PRETRAIN_STEP}"
+        --restore_weights_only
+    )
+    echo "[learner] warm start weights only: ${PRETRAIN_DIR}/checkpoint_${PRETRAIN_STEP}"
+else
+    echo "[learner] network initialization: fresh (no checkpoint restore)"
+fi
 
 VALIDATOR_ARGS=()
 if [[ "${ALLOW_UNVERIFIED_DEMO:-0}" == "1" ]]; then
@@ -54,9 +78,7 @@ python "${SCRIPT_DIR}/../../../utils/debug_tools/validate_marvin_demo.py" \
 python "${EXAMPLES_DIR}/train_rlpd.py" \
     --exp_name=marvin_usb_insertion \
     --checkpoint_path="${RUN_DIR}" \
-    --restore_checkpoint_path="${PRETRAIN_DIR}" \
-    --restore_checkpoint_step="${PRETRAIN_STEP}" \
-    --restore_weights_only \
     --demo_path="${DEMO_PATH}" \
     --learner \
+    "${RESTORE_ARGS[@]}" \
     "$@"

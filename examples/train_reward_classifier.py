@@ -12,7 +12,7 @@ from absl import app, flags
 
 from serl_launcher.data.data_store import ReplayBuffer
 from serl_launcher.utils.train_utils import concat_batches
-from serl_launcher.vision.data_augmentations import batched_random_crop
+from serl_launcher.vision.data_augmentations import batched_image_augmentation
 from serl_launcher.networks.reward_classifier import create_classifier
 
 from experiments.mappings import CONFIG_MAPPING
@@ -164,11 +164,15 @@ def main(_):
                                    )
 
     def data_augmentation_fn(rng, observations):
+        augmentation_mode = getattr(config, "classifier_image_augmentation_mode", "drq")
         for pixel_key in config.classifier_keys:
             observations = observations.copy(
                 add_or_replace={
-                    pixel_key: batched_random_crop(
-                        observations[pixel_key], rng, padding=4, num_batch_dims=2
+                    pixel_key: batched_image_augmentation(
+                        observations[pixel_key],
+                        rng,
+                        mode=augmentation_mode,
+                        num_batch_dims=2,
                     )
                 }
             )

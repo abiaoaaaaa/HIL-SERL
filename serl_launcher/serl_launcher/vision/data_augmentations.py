@@ -35,6 +35,62 @@ def batched_random_crop(img, rng, *, padding, num_batch_dims: int = 1):
     img = jnp.reshape(img, original_shape)
     return img
 
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "brightness",
+        "contrast",
+        "saturation",
+        "hue",
+        "apply_prob",
+        "num_batch_dims",
+    ),
+)
+def batched_color_transform(
+    img,
+    rng,
+    *,
+    brightness,
+    contrast,
+    saturation,
+    hue,
+    apply_prob,
+    num_batch_dims: int = 1,
+):
+    """Apply color jitter independently to each item while preserving shape and dtype.
+
+    Camera observations in SERL are uint8 arrays in [0, 255], whereas
+    ``color_transform`` operates on floating point RGB values in [0, 1]. This
+    wrapper performs the conversion only for augmentation and restores the
+    original representation before the image reaches the encoder.
+    """
+    original_shape = img.shape
+    original_dtype = img.dtype
+    flat_img = jnp.reshape(img, (-1, *img.shape[num_batch_dims:]))
+    rngs = jax.random.split(rng, flat_img.shape[0])
+
+    def augment_one(image, image_rng):
+        image = image.astype(jnp.float32) / 255.0
+        image = color_transform(
+            image,
+            image_rng,
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue,
+            to_grayscale_prob=0.0,
+            color_jitter_prob=1.0,
+            apply_prob=1.0,
+            shuffle=True,
+            transform_apply_prob=apply_prob,
+        )
+        image = jnp.rint(image * 255.0)
+        return jnp.clip(image, 0.0, 255.0).astype(original_dtype)
+
+    flat_img = jax.vmap(augment_one, in_axes=(0, 0), out_axes=0)(flat_img, rngs)
+    return jnp.reshape(flat_img, original_shape)
+
 def resize(image, image_dim):
     assert len(image_dim) == 2
     new_shape = list(image.shape)
@@ -174,8 +230,8 @@ def hsv_to_rgb(h, s, v):
     return rr, gg, bb
 
 
-def adjust_brightness(rgb_tuple, delta):
-    return jax.tree.map(lambda x: x + delta, rgb_tuple)
+def adjust_brightness(rgb_tuple, factor):
+    return jax.tree.map(lambda x: x * factor, rgb_tuple)
 
 
 def adjust_contrast(image, factor):
@@ -198,8 +254,10 @@ def adjust_hue(h, s, v, delta):
 
 
 def _random_brightness(rgb_tuple, rng, max_delta):
-    delta = jax.random.uniform(rng, shape=(), minval=-max_delta, maxval=max_delta)
-    return adjust_brightness(rgb_tuple, delta)
+    factor = jax.random.uniform(
+        rng, shape=(), minval=1 - max_delta, maxval=1 + max_delta
+    )
+    return adjust_brightness(rgb_tuple, factor)
 
 
 def _random_contrast(rgb_tuple, rng, max_delta):
@@ -240,12 +298,30 @@ def color_transform(
     to_grayscale_prob,
     color_jitter_prob,
     apply_prob,
-    shuffle
+    shuffle,
+    transform_apply_prob=1.0,
 ):
-    """Applies color jittering to a single image."""
+    """Applies color jittering to a single image.
+
+    Each brightness/contrast/saturation/hue operation is sampled independently
+    with ``transform_apply_prob``. ``apply_prob`` remains the optional global
+    gate for callers that want to enable or disable the complete color pipeline.
+    """
     apply_rng, transform_rng = jax.random.split(rng)
-    perm_rng, b_rng, c_rng, s_rng, h_rng, cj_rng, gs_rng = jax.random.split(
-        transform_rng, 7
+    (
+        perm_rng,
+        b_rng,
+        c_rng,
+        s_rng,
+        h_rng,
+        cj_rng,
+        gs_rng,
+        b_apply_rng,
+        c_apply_rng,
+        s_apply_rng,
+        h_apply_rng,
+    ) = jax.random.split(
+        transform_rng, 11
     )
 
     # Whether the transform should be applied at all.
@@ -254,6 +330,14 @@ def color_transform(
     should_apply_gs = jax.random.uniform(gs_rng, shape=()) <= to_grayscale_prob
     # Whether to apply color jittering.
     should_apply_color = jax.random.uniform(cj_rng, shape=()) <= color_jitter_prob
+    should_apply_transform = jnp.stack(
+        [
+            jax.random.uniform(b_apply_rng, shape=()) <= transform_apply_prob,
+            jax.random.uniform(c_apply_rng, shape=()) <= transform_apply_prob,
+            jax.random.uniform(s_apply_rng, shape=()) <= transform_apply_prob,
+            jax.random.uniform(h_apply_rng, shape=()) <= transform_apply_prob,
+        ]
+    )
 
     # Decorator to conditionally apply fn based on an index.
     def _make_cond(fn, idx):
@@ -265,7 +349,10 @@ def color_transform(
                 return jax.tree.map(lambda arg: jnp.clip(arg, 0.0, 1.0), args)
 
             out = jax.lax.cond(
-                should_apply & should_apply_color & (i == idx),
+                should_apply
+                & should_apply_color
+                & should_apply_transform[idx]
+                & (i == idx),
                 args,
                 lambda a: clip(fn(*a)),
                 args,
@@ -302,6 +389,60 @@ def color_transform(
         should_apply & should_apply_gs, out_apply, _to_grayscale, out_apply, lambda x: x
     )
     return jnp.clip(out_apply, 0.0, 1.0)
+
+
+IMAGE_AUGMENTATION_PRESETS = {
+    "none": {
+        "random_shift_padding": 0,
+        "color_apply_prob": 0.0,
+    },
+    "drq": {
+        "random_shift_padding": 4,
+        "color_apply_prob": 0.0,
+    },
+    # DrQ's 4-pixel random shift plus photometric jitter. Each color operation
+    # is sampled independently with probability 0.3.
+    "medium": {
+        "random_shift_padding": 4,
+        "color_apply_prob": 0.3,
+        "brightness": 0.15,
+        "contrast": 0.15,
+        "saturation": 0.15,
+        "hue": 0.02,
+    },
+}
+
+
+def batched_image_augmentation(img, rng, *, mode="drq", num_batch_dims: int = 1):
+    """Apply a named augmentation preset to an NHWC image batch."""
+    if mode not in IMAGE_AUGMENTATION_PRESETS:
+        valid_modes = ", ".join(IMAGE_AUGMENTATION_PRESETS)
+        raise ValueError(f"Unknown image augmentation mode '{mode}'. Choose from: {valid_modes}.")
+
+    aug_config = IMAGE_AUGMENTATION_PRESETS[mode]
+    color_rng, crop_rng = jax.random.split(rng)
+
+    if aug_config["color_apply_prob"] > 0:
+        img = batched_color_transform(
+            img,
+            color_rng,
+            brightness=aug_config["brightness"],
+            contrast=aug_config["contrast"],
+            saturation=aug_config["saturation"],
+            hue=aug_config["hue"],
+            apply_prob=aug_config["color_apply_prob"],
+            num_batch_dims=num_batch_dims,
+        )
+
+    if aug_config["random_shift_padding"] > 0:
+        img = batched_random_crop(
+            img,
+            crop_rng,
+            padding=aug_config["random_shift_padding"],
+            num_batch_dims=num_batch_dims,
+        )
+
+    return img
 
 
 def random_flip(image, rng):

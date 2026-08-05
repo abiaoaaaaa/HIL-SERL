@@ -37,10 +37,12 @@ cd examples/experiments/marvin_usb_insertion
 bash run_record_demos.sh 20
 ```
 
-2. 启动 learner，把实际生成的 demo 路径作为第一个参数：
+2. 启动 learner，把实际生成的 demo 绝对路径作为第一个参数。当前默认使用
+   Actor/Critic 两层 `(256, 256)` 隐藏层、medium 图像增强。默认从 `checkpoints_final_scale15_rot003_stream60_fresh` 的最新 checkpoint 只加载模型权重；优化器、在线 replay 和 intervention demo buffer 均重新初始化，demo 数据由下面的路径单独加载。medium 模式保留 DrQ 的四周填充 `4 px` 后随机裁剪，并使用亮度、对比度和饱和度系数 `0.85～1.15`、色相 `±0.02`；四项颜色增强分别以 `0.3` 概率独立触发：
 
 ```bash
-bash run_learner.sh /home/xlb/code_marvin/hil-serl/examples/demo_data/<新录制文件>.pkl
+bash run_learner.sh \
+  /home/xlb/code_marvin/hil-serl/examples/demo_data/marvin_usb_insertion_20_demos_2026-08-04_10-28-33.pkl
 ```
 
 3. 另一个终端启动真机 Actor：
@@ -49,16 +51,16 @@ bash run_learner.sh /home/xlb/code_marvin/hil-serl/examples/demo_data/<新录制
 bash run_actor.sh
 ```
 
-Actor 和 learner 必须使用相同的 `RUN_NAME`、`PRETRAIN_DIR` 和 `PRETRAIN_STEP`。默认值已在两个脚本中保持一致。若要修改：
+Actor 和 learner 必须使用相同的 `RUN_NAME`。默认值已在两个脚本中保持一致。
+若要为另一组全新实验指定目录：
 
 ```bash
-RUN_NAME=checkpoints_final_run2 \
-PRETRAIN_STEP=270000 \
+RUN_NAME=checkpoints_256_medium_run2 \
 bash run_learner.sh /absolute/path/to/new_demo.pkl
 
-RUN_NAME=checkpoints_final_run2 \
-PRETRAIN_STEP=270000 \
+RUN_NAME=checkpoints_256_medium_run2 \
 bash run_actor.sh
 ```
 
 learner 默认拒绝在含有 checkpoint、`buffer/` 或 `demo_buffer/` 的目录中启动“全新训练”。只有明确续训时才使用 `ALLOW_RESUME=1`。
+默认 `PRETRAIN_STEP=0`，脚本会自动选择源目录中编号最大的 checkpoint；当前为 `checkpoint_392000`。只有网络参数 shape 一致的 `(256, 256)` checkpoint 才能通过 `PRETRAIN_DIR` 加载。

@@ -8,7 +8,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.1
 export WANDB_MODE=disabled
 
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRIPT_DIR}/checkpoints_final_scale15_rot003_stream60_fresh}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRIPT_DIR}/checkpoints_scale15_rot003_stream60_256_medium_from392k}"
 CHECKPOINT_STEP="${1:-latest}"
 
 if [[ "${CHECKPOINT_STEP}" == "latest" ]]; then

@@ -253,6 +253,15 @@ class TrainConfig(DefaultTrainingConfig):
     # ==================== 算法参数 ====================
     agent = "drq"  # 使用DrQ算法
     encoder_type = "resnet-pretrained"
+    # Actor、Critic 和 Grasp Critic 均使用两层 256 单元的 MLP。
+    actor_hidden_dims = (256, 256)
+    critic_hidden_dims = (256, 256)
+    grasp_critic_hidden_dims = (256, 256)
+    # none: 无增强；drq: 仅4像素随机平移；medium: DrQ平移 + 独立概率颜色增强。
+    # medium: 4像素随机平移；亮度/对比度/饱和度0.85~1.15、色相±0.02，每项概率0.3。
+    # 该增强仅用于 learner 更新，actor 在线执行和评估不会调用。
+    image_augmentation_mode = "medium"
+    classifier_image_augmentation_mode = "medium"
     demo_path = "/home/xlb/code_marvin/hil-serl/examples/experiments/resnet10_params.pkl"  # Demo数据路径（可选）
 
     # ==================== 奖励配置 ====================
