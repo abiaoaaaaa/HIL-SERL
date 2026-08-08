@@ -21,8 +21,50 @@ class RSCapture:
         if self.depth:
             self.cfg.enable_stream(rs.stream.depth, dim[0], dim[1], rs.format.z16, fps)
         self.profile = self.pipe.start(self.cfg)
-        self.s = self.profile.get_device().query_sensors()[0]
-        self.s.set_option(rs.option.exposure, exposure)
+
+        # D405 的彩色流来自 Stereo Module，而 D415 使用独立的 RGB Camera。
+        # 不能依赖 query_sensors()[0]，必须根据传感器提供的流类型查找。
+        device = self.profile.get_device()
+        self.s = next(
+            (
+                sensor
+                for sensor in device.query_sensors()
+                if any(
+                    stream_profile.stream_type() == rs.stream.color
+                    for stream_profile in sensor.get_stream_profiles()
+                )
+            ),
+            None,
+        )
+        if self.s is None:
+            self.pipe.stop()
+            raise RuntimeError(
+                f"{self.name}: no RealSense sensor provides the color stream"
+            )
+
+        sensor_name = self.s.get_info(rs.camera_info.name)
+        if self.s.supports(rs.option.enable_auto_exposure):
+            self.s.set_option(rs.option.enable_auto_exposure, 0)
+        if not self.s.supports(rs.option.exposure):
+            self.pipe.stop()
+            raise RuntimeError(
+                f"{self.name}: color sensor {sensor_name!r} does not support exposure"
+            )
+
+        exposure_range = self.s.get_option_range(rs.option.exposure)
+        if not exposure_range.min <= exposure <= exposure_range.max:
+            self.pipe.stop()
+            raise ValueError(
+                f"{self.name}: exposure={exposure} is outside the supported range "
+                f"[{exposure_range.min}, {exposure_range.max}]"
+            )
+
+        self.s.set_option(rs.option.exposure, float(exposure))
+        actual_exposure = self.s.get_option(rs.option.exposure)
+        print(
+            f"[RealSense] {self.name}: color_sensor={sensor_name}, "
+            f"exposure={actual_exposure:g}, auto_exposure=off"
+        )
 
         # Create an align object
         # rs.align allows us to perform alignment of depth frames to others frames

@@ -132,7 +132,7 @@ class DefaultMarvinEnvConfig:
     USE_STREAMING_CARTESIAN: bool = True
     STREAM_CONTROL_HZ: int = 200
     STREAM_LINEAR_VEL_MM_S: float = 60.0
-    STREAM_LINEAR_ACC_MM_S2: float = 200.0
+    STREAM_LINEAR_ACC_MM_S2: float = 300.0
     STREAM_YAW_VEL_DEG_S: float = 20.0
     STREAM_YAW_ACC_DEG_S2: float = 120.0
 

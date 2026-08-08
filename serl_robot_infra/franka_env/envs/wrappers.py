@@ -45,11 +45,13 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         reward_classifier_func,
         target_hz=None,
         reward_reset_func=None,
+        terminal_failure_reward=None,
     ):
         super().__init__(env)
         self.reward_classifier_func = reward_classifier_func
         self.target_hz = target_hz
         self.reward_reset_func = reward_reset_func
+        self.terminal_failure_reward = terminal_failure_reward
 
     def compute_reward(self, obs):
         if self.reward_classifier_func is not None:
@@ -60,10 +62,18 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         start_time = time.time()
         obs, rew, done, truncated, info = self.env.step(action)
         rew = self.compute_reward(obs)
-        # 修复: 只有奖励 >= 0.5 才判定为成功并触发 done
-        # 这样支持负奖励惩罚（如动作平滑度），同时保持正确的 episode 终止逻辑
-        done = done or (rew >= 0.5)
-        info['succeed'] = bool(rew >= 0.5)
+        success = bool(rew >= 0.5)
+        terminal_failure = bool(
+            self.terminal_failure_reward is not None
+            and rew <= self.terminal_failure_reward
+        )
+        # 普通的平滑度负奖励不终止 episode；只有明确达到
+        # terminal_failure_reward 的不可恢复失败才会立即终止。
+        done = done or success or terminal_failure
+        info['succeed'] = success
+        info['unrecoverable_failure'] = terminal_failure
+        if terminal_failure:
+            info['failure_reason'] = 'keyboard_esc'
         if self.target_hz is not None:
             time.sleep(max(0, 1/self.target_hz - (time.time() - start_time)))
 

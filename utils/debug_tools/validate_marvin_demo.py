@@ -11,16 +11,22 @@ import numpy as np
 
 EXPECTED_CONTROL = {
     "impedance_mode": "cartesian",
-    "action_scale": [15.0, 0.03, 1.0],
+    "action_scale": [10.0, 0.03, 1.0],
     "position_action_limit": 1.0,
     "policy_hz": 10,
     "stream_control_hz": 200,
     "stream_linear_velocity_mm_s": 60.0,
-    "stream_linear_acceleration_mm_s2": 200.0,
+    "stream_linear_acceleration_mm_s2": 300.0,
     "stream_yaw_velocity_deg_s": 20.0,
     "stream_yaw_acceleration_deg_s2": 120.0,
 }
-EXPECTED_IMAGES = {"side_classifier", "side_policy", "wrist_1", "wrist_2"}
+EXPECTED_IMAGES = {
+    "side_classifier",
+    "side_policy",
+    "wrist_1",
+    "wrist_1buchong",
+    "wrist_2",
+}
 
 
 def _equal(actual, expected):

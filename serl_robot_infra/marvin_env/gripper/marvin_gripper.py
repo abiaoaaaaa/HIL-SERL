@@ -56,6 +56,12 @@ class MarvinGripperController:
         self.CLOSE_KP = 8.0   # 夹紧刚度（更高，确保夹紧力）
         self.CLOSE_KD = 0.2    # 夹紧阻尼
 
+        # 闭合时不要一步跳到物理极限。在 0.3 秒内使用 10 个 MIT
+        # 位置目标，从实测位置线性插值到 CLOSE_RAD。
+        self.CLOSE_DURATION = 0.3
+        self.CLOSE_INTERPOLATION_POINTS = 10
+        self.COMMAND_INTERVAL = self.CLOSE_DURATION / self.CLOSE_INTERPOLATION_POINTS
+
         self.current_position = 0.0
         self.is_enabled = False
 
@@ -113,12 +119,18 @@ class MarvinGripperController:
         return self._move_to_position(self.OPEN_RAD, blocking)
 
     def close(self, blocking: bool = True) -> bool:
-        """关闭夹爪（高刚度夹紧）"""
+        """用 0.3 秒、10 点阻塞式插值关闭夹爪（最终保持高刚度夹紧）。"""
         print(f"[MarvinGripper] 🔴 close() 被调用 (blocking={blocking})")
-        return self._move_to_position(self.CLOSE_RAD, blocking, use_higher_stiffness=True)
+        return self._move_to_position(
+            self.CLOSE_RAD,
+            blocking=True,
+            use_higher_stiffness=True,
+            interpolation_duration=self.CLOSE_DURATION,
+        )
 
     def _move_to_position(self, target_rad: float, blocking: bool = False,
-                          use_higher_stiffness: bool = False) -> bool:
+                          use_higher_stiffness: bool = False,
+                          interpolation_duration: float = 0.0) -> bool:
         """移动到指定位置 (弧度)"""
         if not self.is_enabled or self.gripper_control is None:
             print("[MarvinGripper] 警告: 夹爪未初始化")
@@ -131,29 +143,47 @@ class MarvinGripperController:
             kp = self.CLOSE_KP if use_higher_stiffness else self.KP
             kd = self.CLOSE_KD if use_higher_stiffness else self.KD
 
-            # 优化：增加非阻塞模式的命令数，从 5 增加到 15
-            # 15 × 50ms = 750ms，给电机更多时间到达目标位置
-            num_commands = 20 if blocking else 15
+            # 使用最新实测位置作为插值起点，避免第一条 MIT 指令直接跳到闭合极限。
+            self._update_position()
+            start_position = float(
+                np.clip(self.current_position, self.OPEN_RAD, self.CLOSE_RAD)
+            )
+
+            if interpolation_duration > 0.0:
+                num_commands = self.CLOSE_INTERPOLATION_POINTS
+                command_positions = np.linspace(
+                    start_position, target_rad, num_commands + 1, dtype=np.float64
+                )[1:]
+                motion_desc = f"{interpolation_duration:.2f}s线性插值"
+            else:
+                # 打开动作暂时保持原行为：重复发送同一个目标位置。
+                num_commands = 20 if blocking else 15
+                command_positions = np.full(num_commands, target_rad, dtype=np.float64)
+                motion_desc = "直接目标"
 
             print(f"[MarvinGripper] 开始移动: 目标={target_rad:.2f}rad, "
-                  f"当前={self.current_position:.3f}rad, "
+                  f"当前={start_position:.3f}rad, 方式={motion_desc}, "
                   f"命令数={num_commands}, kp={kp}, kd={kd}")
 
             start_time = time.time()
 
-            for i in range(num_commands):
+            for i, command_position in enumerate(command_positions):
                 self.gripper_control.controlMIT(
                     self.motor, kp=kp, kd=kd,
-                    q=target_rad, dq=0, tau=0
+                    q=float(command_position), dq=0, tau=0
                 )
-                time.sleep(0.05)
+                time.sleep(self.COMMAND_INTERVAL)
 
                 self.gripper_control.recv()
                 self.current_position = self.motor.getPosition()
 
                 # 🔍 DEBUG: 打印关键步骤的位置（首次、中间、最后）
                 if i == 0 or i == num_commands // 2 or i == num_commands - 1:
-                    print(f"    [step {i:2d}/{num_commands}] 位置={self.current_position:.3f}rad")
+                    print(
+                        f"    [step {i + 1:2d}/{num_commands}] "
+                        f"指令={command_position:.3f}rad, "
+                        f"实测={self.current_position:.3f}rad"
+                    )
 
             elapsed = time.time() - start_time
             distance = abs(self.current_position - target_rad)

@@ -806,7 +806,8 @@ class MarvinEnv(gym.Env):
                     print(f"[GRIPPER_DEBUG] ✅ 执行关闭: pos={pos:.2f} <= -0.5, "
                           f"curr_pos={self.curr_gripper_pos:.2f} > 0.5, "
                           f"time_ok={time_since_last:.3f} > {self.gripper_sleep:.2f}")
-                    self.gripper.close(blocking=False)
+                    # 关闭采用 0.3 秒、10 点位置插值，并阻塞到指令发送完成。
+                    self.gripper.close(blocking=True)
                     self.last_gripper_act = time.time()
                     # ⚠️ 暂时注释掉立即更新，等下一个 _update_currpos 从电机读取真实值
                     # self.curr_gripper_pos = 0.0
@@ -1578,36 +1579,44 @@ class MarvinEnv(gym.Env):
         return result
 
     def get_im(self) -> Dict[str, np.ndarray]:
-        """获取相机图像（避免重复读取共享相机）"""
+        """获取相机图像（共享相机只读一次，每个逻辑键独立裁剪）。"""
         images = {}
-        processed_caps = {}  # 记录已处理的相机对象
+        raw_frames = {}  # cap_id -> 本轮读取的原始BGR帧（或None）
+        source_keys = {}  # cap_id -> 首次读取该物理相机的逻辑键
 
         for key, cap in self.cap.items():
             t0 = time.time()
+            cap_id = id(cap)
             try:
-                # 🔧 检查是否是共享相机（cap 对象相同）
-                cap_id = id(cap)
-                if cap_id in processed_caps:
-                    # 复用已读取的图像
-                    source_key = processed_caps[cap_id]
-                    dt_reuse = (time.time() - t0) * 1000
-                    print(f"[get_im] {key}: reuse from {source_key} ({dt_reuse:.1f}ms)")
+                if cap_id in raw_frames:
+                    # 复用同一step中已读取的原始帧，不再调用cap.read()。
+                    rgb = raw_frames[cap_id]
+                    source_key = source_keys[cap_id]
+                    read_label = f"reuse_raw={source_key}"
+                else:
+                    # 每个物理相机每个step最多读取一次。
+                    rgb = cap.read()
+                    raw_frames[cap_id] = rgb
+                    source_keys[cap_id] = key
+                    read_label = f"read={(time.time() - t0) * 1000:.1f}ms"
 
-                    # 直接复制处理后的图像（已经是 128x128 RGB）
-                    images[key] = images[source_key].copy()
-                    continue
+                if rgb is None:
+                    raise RuntimeError(
+                        f"共享相机原始帧为空 (source={source_keys.get(cap_id, key)})"
+                    )
 
-                # 读取新的图像
-                rgb = cap.read()
-                dt_read = (time.time() - t0) * 1000
-                cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
+                # 共享的是原始帧；不同逻辑观测必须应用各自的裁剪。
+                cropped_rgb = (
+                    self.config.IMAGE_CROP[key](rgb)
+                    if key in self.config.IMAGE_CROP
+                    else rgb
+                )
+                if cropped_rgb.size == 0:
+                    raise RuntimeError(f"IMAGE_CROP[{key!r}] 产生了空图像")
                 resized = cv2.resize(cropped_rgb, (128, 128))
                 images[key] = resized[..., ::-1]  # BGR -> RGB
                 dt_total = (time.time() - t0) * 1000
-                print(f"[get_im] {key}: read={dt_read:.1f}ms total={dt_total:.1f}ms")
-
-                # 记录此相机对象已处理
-                processed_caps[cap_id] = key
+                print(f"[get_im] {key}: {read_label} total={dt_total:.1f}ms")
 
                 if self.save_video:
                     if not hasattr(self, 'recording_frames'):
@@ -1615,6 +1624,9 @@ class MarvinEnv(gym.Env):
                     self.recording_frames.append({key: cropped_rgb.copy()})
 
             except Exception as e:
+                # 首次读取失败后也记住失败，共享键不再做第二次阻塞读取。
+                raw_frames.setdefault(cap_id, None)
+                source_keys.setdefault(cap_id, key)
                 dt_total = (time.time() - t0) * 1000
                 print(f"[get_im] {key} 读取失败 [{dt_total:.1f}ms]: {e}")
                 images[key] = np.zeros((128, 128, 3), dtype=np.uint8)

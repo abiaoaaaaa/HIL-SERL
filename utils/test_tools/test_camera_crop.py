@@ -97,7 +97,30 @@
 """
 import sys
 import os
+
+
+def _configure_qt_font_dir():
+    """避免 OpenCV Qt 后端指向包内不存在的字体目录。"""
+    configured_dir = os.environ.get("QT_QPA_FONTDIR")
+    if configured_dir and os.path.isdir(configured_dir):
+        return
+
+    for font_dir in (
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/liberation2",
+        "/usr/share/fonts",
+    ):
+        if os.path.isdir(font_dir):
+            os.environ["QT_QPA_FONTDIR"] = font_dir
+            return
+
+
 import cv2
+
+# 当前 OpenCV wheel 会在导入时无条件写入包内 qt/fonts 路径；
+# 因此必须在导入后、首次调用 HighGUI 前纠正一次。
+_configure_qt_font_dir()
+
 import numpy as np
 import glob
 
@@ -108,9 +131,23 @@ sys.path.insert(0, project_root)
 
 from examples.experiments.marvin_usb_insertion.config import MarvinUSBEnvConfig
 
+
+PHYSICAL_CAMERA_NAMES = ('wrist_1', 'wrist_2', 'side_policy')
+SHARED_IMAGE_SOURCES = {
+    'wrist_1buchong': 'wrist_1',
+    'side_classifier': 'side_policy',
+}
+GUI_WINDOW_NAMES = {
+    # OpenCV HighGUI/Qt 的内部窗口标识统一使用 ASCII。
+    'wrist_1补充': 'wrist_1_supplement',
+    'wrist_1buchong': 'wrist_1_supplement',
+}
+
+
 class CropSelector:
-    def __init__(self, window_name, original_image):
-        self.window_name = window_name
+    def __init__(self, camera_name, original_image):
+        self.camera_name = camera_name
+        self.window_name = GUI_WINDOW_NAMES.get(camera_name, camera_name)
         self.original = original_image.copy()
         self.display = original_image.copy()
         self.h, self.w = original_image.shape[:2]
@@ -120,8 +157,22 @@ class CropSelector:
         self.drawing = False
         self.start_point = None
 
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.setMouseCallback(self.window_name, self.mouse_callback)
+        try:
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            # OpenCV 5 的 Qt 后端可能延迟创建原生窗口。
+            cv2.imshow(self.window_name, self.display)
+            cv2.waitKey(1)
+            cv2.setMouseCallback(self.window_name, self.mouse_callback)
+        except cv2.error as exc:
+            try:
+                cv2.destroyWindow(self.window_name)
+            except cv2.error:
+                pass
+            raise RuntimeError(
+                f"无法创建相机裁剪窗口 {camera_name!r}。"
+                f" DISPLAY={os.environ.get('DISPLAY')!r},"
+                f" QT_QPA_FONTDIR={os.environ.get('QT_QPA_FONTDIR')!r}"
+            ) from exc
 
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -233,7 +284,7 @@ class CropSelector:
             right = self.w - x2
 
             print(f"\n{'='*70}")
-            print(f"[{self.window_name}] 裁剪区域已选择:")
+            print(f"[{self.camera_name}] 裁剪区域已选择:")
             print(f"{'='*70}")
             print(f"  原始尺寸: {self.w}x{self.h}")
             print(f"  裁剪坐标: ({x1}, {y1}) -> ({x2}, {y2})")
@@ -276,7 +327,7 @@ class CropSelector:
         self.crop_coords = None
         self.display = self.original.copy()
         self.update_display()
-        print(f"\n[{self.window_name}] 裁剪区域已重置")
+        print(f"\n[{self.camera_name}] 裁剪区域已重置")
 
     def show_cropped(self):
         """显示裁剪后的图像"""
@@ -305,14 +356,14 @@ def load_camera_images():
         print(f"  请先运行: python utils/visualization_tools/view_cameras.py")
         return images
 
-    # 查找每个相机的最新快照
-    for cam_name in ['wrist_1', 'wrist_2', 'side_policy']:
-        # 查找该相机的所有快照（按时间排序）
+    # 查找每个物理相机的最新快照。
+    for cam_name in PHYSICAL_CAMERA_NAMES:
         pattern = os.path.join(snapshots_dir, f"{cam_name}_*.jpg")
-        files = sorted(glob.glob(pattern), reverse=True)  # 最新的在前
+        files = glob.glob(pattern)
 
         if files:
-            latest_file = files[0]
+            # 文件名可能包含 *_test.jpg，不能用字符串排序判断最新。
+            latest_file = max(files, key=os.path.getmtime)
             img = cv2.imread(latest_file)
             if img is not None:
                 images[cam_name] = img
@@ -325,10 +376,14 @@ def load_camera_images():
             print(f"✗ 未找到 {cam_name} 的快照")
             print(f"  请先运行: python utils/visualization_tools/view_cameras.py")
 
-    # side_classifier 使用 side_policy 的图像
-    if 'side_policy' in images:
-        images['side_classifier'] = images['side_policy']
-        print(f"✓ side_classifier 使用 side_policy 图像")
+    # 逻辑观测复用对应物理相机的同一张原始快照，
+    # 在独立窗口中选择不同裁剪范围。
+    for logical_name, source_name in SHARED_IMAGE_SOURCES.items():
+        if source_name in images:
+            images[logical_name] = images[source_name]
+            print(f"✓ {logical_name} 复用 {source_name} 原始快照")
+        else:
+            print(f"✗ {logical_name} 缺少来源快照 {source_name}")
 
     return images
 
@@ -397,17 +452,8 @@ def main():
     # 创建选择器
     selectors = {}
     for cam_name, image in images.items():
-        if cam_name == 'side_classifier':
-            continue  # 跳过，因为与 side_policy 共享图像
-
         selector = CropSelector(cam_name, image)
         selectors[cam_name] = selector
-        selector.update_display()
-
-    # side_classifier 单独处理
-    if 'side_policy' in images:
-        selector = CropSelector('side_classifier', images['side_policy'])
-        selectors['side_classifier'] = selector
         selector.update_display()
 
     print("\n开始配置裁剪区域...")

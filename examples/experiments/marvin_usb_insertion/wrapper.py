@@ -306,6 +306,7 @@ class MarvinUSBEnv(MarvinEnv):
 
         self._update_currpos()
         self._reset_stream_reference()
+        time.sleep(3)
 
     def _auto_reset_usb(self):
         """自动USB抓取流程: 移动到USB上方 -> 下降 -> 夹取 -> 抬起 -> 移动到reset"""

@@ -400,6 +400,16 @@ IMAGE_AUGMENTATION_PRESETS = {
         "random_shift_padding": 4,
         "color_apply_prob": 0.0,
     },
+    # A lighter photometric variant for the real-robot policy. Keep DrQ's
+    # original 4-pixel shift and reduce both color magnitude and frequency.
+    "light": {
+        "random_shift_padding": 4,
+        "color_apply_prob": 0.25,
+        "brightness": 0.12,
+        "contrast": 0.12,
+        "saturation": 0.12,
+        "hue": 0.015,
+    },
     # DrQ's 4-pixel random shift plus photometric jitter. Each color operation
     # is sampled independently with probability 0.3.
     "medium": {

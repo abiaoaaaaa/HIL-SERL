@@ -196,11 +196,14 @@ def main():
     print("=" * 70)
 
     # 初始化相机
+    serial_to_name = {}
     for cam_name, cam_config in config.REALSENSE_CAMERAS.items():
-        # 跳过共享相机
-        if cam_name == "side_classifier" and "side_policy" in caps:
-            print(f"\n[{cam_name}] 共享 side_policy 相机")
-            caps[cam_name] = caps["side_policy"]
+        serial = cam_config['serial_number']
+        # 所有同序列号逻辑观测都复用已打开的物理相机。
+        if serial in serial_to_name:
+            source_name = serial_to_name[serial]
+            print(f"\n[{cam_name}] 共享 {source_name} 相机")
+            caps[cam_name] = caps[source_name]
             continue
 
         try:
@@ -214,10 +217,12 @@ def main():
                     name=cam_name,
                     serial_number=cam_config['serial_number'],
                     dim=cam_config['dim'],
+                    fps=cam_config.get('fps', 15),
                     exposure=cam_config.get('exposure', 10500),
                 )
             )
             caps[cam_name] = cap
+            serial_to_name[serial] = cam_name
             print(f"  状态: ✓ 成功")
             time.sleep(0.5)  # 每个相机初始化后等待0.5秒
 

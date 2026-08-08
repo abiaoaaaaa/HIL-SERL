@@ -3,7 +3,7 @@
 Demo 轨迹完整可视化工具 - Visualize Demo Actions and States
 
 功能：
-    从 demo_buffer 中随机采样若干条完整轨迹，在同一张图上绘制动作和状态。
+    从 buffer 中选择若干条完整轨迹，在同一张图上绘制动作和状态。
     用不同颜色区分人工干预和机器人自主执行的部分。
 
 主要功能：
@@ -90,20 +90,21 @@ import numpy as np
 plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
-# 动作维度名称（6维）
-ACTION_NAMES = ['dx', 'dy', 'dz', 'drx', 'dry', 'drz']
+# Marvin 当前动作维度：[dx, dy, dz, drz, gripper]
+ACTION_NAMES = ['dx', 'dy', 'dz', 'drz', 'gripper']
 ACTION_LABELS = [
     'dx (Translation X)',
     'dy (Translation Y)',
     'dz (Translation Z)',
-    'drx (Roll)',
-    'dry (Pitch)',
-    'drz (Yaw)'
+    'drz (Yaw)',
+    'gripper (-1 close / 0 hold / +1 open)',
 ]
 
-# 状态维度名称（19维）
+# SERLObsWrapper 按字母序拼接出的 Marvin 24维状态。
 STATE_NAMES = [
     'Gripper',
+    'Last Action dx', 'Last Action dy', 'Last Action dz',
+    'Last Action drz', 'Last Action gripper',
     'Force X', 'Force Y', 'Force Z',
     'TCP X', 'TCP Y', 'TCP Z',
     'TCP Rx', 'TCP Ry', 'TCP Rz',
@@ -146,6 +147,11 @@ def parse_args():
         type=int,
         default=42,
         help='随机种子（默认：42）'
+    )
+    parser.add_argument(
+        '--latest',
+        action='store_true',
+        help='选择时间顺序最后的完整轨迹，而不是随机采样'
     )
     parser.add_argument(
         '--use-chinese',
@@ -266,13 +272,17 @@ def split_episodes(transitions, is_human):
     return complete_episodes
 
 
-def sample_trajectories(episodes, num_trajectories, seed):
-    """随机采样轨迹"""
-    print(f"\n随机采样 {num_trajectories} 条轨迹...")
+def sample_trajectories(episodes, num_trajectories, seed, latest=False):
+    """选择最新或随机轨迹。"""
+    selection_name = "最新" if latest else "随机"
+    print(f"\n选择 {selection_name} {num_trajectories} 条轨迹...")
 
     if len(episodes) <= num_trajectories:
         print(f"  可用轨迹不足，返回全部 {len(episodes)} 条")
         sampled = episodes
+    elif latest:
+        sampled = episodes[-num_trajectories:]
+        print(f"  已选择最后 {len(sampled)} 条完整轨迹")
     else:
         random.seed(seed)
         sampled = random.sample(episodes, num_trajectories)
@@ -287,11 +297,19 @@ def plot_trajectory_full(trajectory_data, trajectory_id, output_dir, use_chinese
     states = trajectory_data['states']
     is_human = trajectory_data['is_human']
 
-    # 创建图形（7行5列，共35个子图位置）
-    # 第1行：动作 dx, dy, dz, drx, dry
-    # 第2行：动作 drz + 4个分隔区域
-    # 第3-7行：19个状态
-    fig, axes = plt.subplots(7, 5, figsize=(20, 16))
+    expected_action_dims = len(ACTION_NAMES)
+    expected_state_dims = len(STATE_NAMES)
+    if actions.shape[1] != expected_action_dims:
+        raise ValueError(
+            f"Expected {expected_action_dims} action dims, got {actions.shape[1]}"
+        )
+    if states.shape[1] != expected_state_dims:
+        raise ValueError(
+            f"Expected {expected_state_dims} state dims, got {states.shape[1]}"
+        )
+
+    # 当前 5维动作 + 24维状态，共29个子图，使用6行×5列布局。
+    fig, axes = plt.subplots(6, 5, figsize=(20, 15))
     fig.suptitle(f'Trajectory {trajectory_id} - Actions & States (Length: {len(actions)} steps)',
                  fontsize=16, fontweight='bold')
 
@@ -305,10 +323,10 @@ def plot_trajectory_full(trajectory_data, trajectory_id, output_dir, use_chinese
     legend_human = 'Human Intervention'
     legend_robot = 'Robot Execution'
 
-    # ========== 绘制动作（前6个子图）==========
-    action_positions = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0)]
+    # ========== 绘制动作（第一行5个子图）==========
+    action_positions = [(0, col) for col in range(5)]
 
-    for dim_idx in range(6):
+    for dim_idx in range(expected_action_dims):
         row, col = action_positions[dim_idx]
         ax = axes[row, col]
 
@@ -356,18 +374,14 @@ def plot_trajectory_full(trajectory_data, trajectory_id, output_dir, use_chinese
     # 添加图例
     axes[0, 0].legend(loc='upper right', fontsize=7, framealpha=0.9)
 
-    # 隐藏分隔区域
-    for col in range(1, 5):
-        axes[1, col].set_visible(False)
-
-    # ========== 绘制状态（19个子图）==========
+    # ========== 绘制状态（24个子图）==========
     state_positions = []
-    for row in range(2, 7):
+    for row in range(1, 6):
         for col in range(5):
             state_positions.append((row, col))
-    state_positions = state_positions[:19]  # 只取前19个
+    state_positions = state_positions[:expected_state_dims]
 
-    for dim_idx in range(19):
+    for dim_idx in range(expected_state_dims):
         row, col = state_positions[dim_idx]
         ax = axes[row, col]
 
@@ -404,7 +418,7 @@ def plot_trajectory_full(trajectory_data, trajectory_id, output_dir, use_chinese
             ax.set_ylim(y_min - 0.1, y_max + 0.1)
 
     # 隐藏最后一个空位置
-    axes[6, 4].set_visible(False)
+    axes[5, 4].set_visible(False)
 
     # 调整布局
     plt.tight_layout()
@@ -442,7 +456,9 @@ def main():
         return 1
 
     # 采样轨迹
-    sampled_episodes = sample_trajectories(episodes, args.num_trajectories, args.seed)
+    sampled_episodes = sample_trajectories(
+        episodes, args.num_trajectories, args.seed, latest=args.latest
+    )
 
     # 创建输出目录
     output_dir = Path(args.output_dir)
@@ -455,7 +471,7 @@ def main():
         indices = episode['indices']
 
         # 提取动作和状态
-        actions = np.array([transitions[i]['actions'][:6] for i in indices])
+        actions = np.array([transitions[i]['actions'][:len(ACTION_NAMES)] for i in indices])
         states = np.array([transitions[i]['observations']['state'].flatten()
                           for i in indices])
         is_human_traj = np.array(episode['is_human'])
@@ -478,7 +494,10 @@ def main():
     print("\n提示:")
     print("  - 蓝色线段：人工干预")
     print("  - 橙色线段：机器人执行")
-    print("  - 每个图包含 6 个动作 + 19 个状态子图")
+    print(
+        f"  - 每个图包含 {len(ACTION_NAMES)} 个动作 + "
+        f"{len(STATE_NAMES)} 个状态子图"
+    )
 
     return 0
 

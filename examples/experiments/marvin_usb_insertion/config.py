@@ -44,36 +44,45 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
         "wrist_1": {
             "serial_number": "427622274205",
             "dim": (640, 480),  # RealSense标准分辨率
-            "fps": 30,
-            "exposure": 8000,
+            "fps": 15,
+            "exposure": 20000,
+        },
+        # 与wrist_1共享同一物理相机；只新增一个更小视野的逻辑观测。
+        "wrist_1buchong": {
+            "serial_number": "427622274205",
+            "dim": (640, 480),
+            "fps": 15,
+            "exposure": 20000,  # 共享键，实际以wrist_1为准
         },
         "wrist_2": {
             "serial_number": "427622272953",
             "dim": (640, 480),  # RealSense标准分辨率
-            "fps": 30,
-            "exposure": 8000,
+            "fps": 15,
+            "exposure": 20000,
         },
         # side_policy必须在side_classifier之前（共享相机）
         "side_policy": {
             "serial_number": "036422060870",
             "dim": (1280, 720),  # RealSense标准分辨率
-            "fps": 30,
-            "exposure": 8000,
+            "fps": 15,
+            # D415 RGB Camera的手动曝光上限为10000。
+            "exposure": 150,
         },
         "side_classifier": {
             "serial_number": "036422060870",  # 共享side_policy的相机
             "dim": (1280, 720),  # RealSense标准分辨率
-            "fps": 30,
-            "exposure": 8000,
+            "fps": 15,
+            "exposure": 150,  # 共享键，实际以side_policy为准
         },
     }
 
     # 图像裁剪配置
     IMAGE_CROP = {
-        "wrist_1": lambda img: img[185:-41, 183:-142],
-        "wrist_2": lambda img: img[92:-60, 231:-60],
-        "side_policy": lambda img: img[242:-105, 495:-110],
-        "side_classifier": lambda img: img[362:-251, 493:-445],
+        "wrist_1buchong": lambda img: img[225:-152, 267:-247],
+        "wrist_1": lambda img: img[151:-39, 191:-148],
+        "wrist_2": lambda img: img[128:-7, 300:-47],
+        "side_policy": lambda img: img[224:-108, 432:-137],
+        "side_classifier": lambda img: img[283:-183, 413:-307],
     }
 
     # ==================== 任务位姿配置 ====================
@@ -88,7 +97,7 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     # 重置位置 (episode开始位置)
     # RESET_POSE = np.array([356.6, 341.9, 295.0, -91.5, 1.5, -89.4])
     # RESET_POSE = np.array([440.3, 314.6, 302.8, 87.1, 0.0, -94.0])
-    RESET_POSE = np.array([ 394.3,  321.7,  200.3,  -90.0005,    0.001,  -90.001])
+    RESET_POSE = np.array([ 394.3,  321.7,  200.3,  -90.5005,    -0.501,  -90.001])
 
     # 任务完成判定阈值
     REWARD_THRESHOLD = np.array([8.0, 8.0, 8.0, 5.0, 5.0, 5.0])
@@ -108,7 +117,7 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     # POSITION_ACTION_LIMIT=1.0 时，每个 EE 平移轴的目标增量上限为 15mm；
     # 三轴同时取极值时，平移向量模长上限为 sqrt(3)*15 ≈ 25.98mm。
     # 每步最大旋转 = 1.0 * ACTION_SCALE[1] = 0.03rad ≈ 1.72°
-    ACTION_SCALE = np.array([15.0, 0.03, 1.0])
+    ACTION_SCALE = np.array([10.0, 0.03, 1.0])
     # ACTION_SCALE = np.array([20.0, 0.05, 1.0])
     # 连续位移动作 dx/dy/dz 的归一化安全上限。drz 与夹爪不受此限制。
     POSITION_ACTION_LIMIT = 1.0  # EE 坐标系每个平移轴的归一化限制
@@ -201,10 +210,10 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     VEL_RATIO = 50
     ACC_RATIO = 50
     # 仅用于 reset / 回原位；不影响 RL step 的执行速度。
-    RESET_VEL_RATIO = 30
-    RESET_ACC_RATIO = 30
-    RESET_MOVLA_VEL = 60
-    RESET_MOVLA_ACC = 60
+    RESET_VEL_RATIO = 20
+    RESET_ACC_RATIO = 20
+    RESET_MOVLA_VEL = 40
+    RESET_MOVLA_ACC = 40
 
     # USB 复位模式
     AUTO_RESET_USB = False
@@ -220,7 +229,7 @@ class TrainConfig(DefaultTrainingConfig):
     """训练配置"""
 
     # ==================== 环境设置 ====================
-    image_keys = ["side_policy","wrist_1", "wrist_2"]  # 策略观测使用的图像
+    image_keys = ["side_policy", "wrist_1buchong", "wrist_1", "wrist_2"]  # 策略观测使用的图像
     classifier_keys = ["side_classifier"]  # 分类器使用的图像
 
     # Proprio状态键 (修改：添加力/力矩观测，匹配Franka配置)
@@ -234,7 +243,7 @@ class TrainConfig(DefaultTrainingConfig):
     batch_size = 256  # 从 256 → 128 (节省 ~5GB)
     max_steps = 1_000_000
     random_steps = 500
-    action_filter_alpha = 0.65  # 轻度EMA；仅过滤连续机械臂动作
+    action_filter_alpha = 0.80  # 轻度EMA；仅过滤连续机械臂动作
     # 与 MarvinUSBEnvConfig 保持一致，供 actor 在 EMA 前裁剪策略输出。
     POSITION_ACTION_LIMIT = MarvinUSBEnvConfig.POSITION_ACTION_LIMIT
     critic_warmup_steps = 2000  # MDP迁移后先校准critic，再恢复actor更新
@@ -248,7 +257,7 @@ class TrainConfig(DefaultTrainingConfig):
     #   - 图像解码缓存: ~5GB
     #   - 系统 + 其他: ~10GB
     # 总计: ~39GB → 需要进一步优化
-    replay_buffer_capacity = 20000  # 从默认200000降低到10000 (足够训练)
+    replay_buffer_capacity = 200000  # 从默认200000降低到10000 (足够训练)
 
     # ==================== 算法参数 ====================
     agent = "drq"  # 使用DrQ算法
@@ -257,11 +266,11 @@ class TrainConfig(DefaultTrainingConfig):
     actor_hidden_dims = (256, 256)
     critic_hidden_dims = (256, 256)
     grasp_critic_hidden_dims = (256, 256)
-    # none: 无增强；drq: 仅4像素随机平移；medium: DrQ平移 + 独立概率颜色增强。
-    # medium: 4像素随机平移；亮度/对比度/饱和度0.85~1.15、色相±0.02，每项概率0.3。
+    # none: 无增强；drq: 仅4像素随机平移；light/medium: DrQ平移 + 颜色增强。
+    # light: 4像素随机平移；亮度/对比度/饱和度0.88~1.12、色相±0.015，每项概率0.25。
     # 该增强仅用于 learner 更新，actor 在线执行和评估不会调用。
-    image_augmentation_mode = "medium"
-    classifier_image_augmentation_mode = "medium"
+    image_augmentation_mode = "light"
+    classifier_image_augmentation_mode = "light"
     demo_path = "/home/xlb/code_marvin/hil-serl/examples/experiments/resnet10_params.pkl"  # Demo数据路径（可选）
 
     # ==================== 奖励配置 ====================
@@ -356,6 +365,7 @@ class TrainConfig(DefaultTrainingConfig):
             from pynput import keyboard as pynput_keyboard
 
             _space_pressed = [False]  # mutability hack for closure
+            _failure_pressed = [False]  # Esc: 标记不可恢复失败
             _last_action = [None]  # 用于动作平滑度惩罚
             _shift_pressed = [False]  # 追踪 Shift 键状态
 
@@ -365,8 +375,14 @@ class TrainConfig(DefaultTrainingConfig):
                     if key in [pynput_keyboard.Key.shift, pynput_keyboard.Key.shift_l, pynput_keyboard.Key.shift_r]:
                         _shift_pressed[0] = True
 
+                    # Esc: 光模块已偏移或发生不可恢复碰撞，立即失败。
+                    if key == pynput_keyboard.Key.esc:
+                        _failure_pressed[0] = True
+                        _space_pressed[0] = False
+                        print("\n🛑 [ESC] 标记为不可恢复失败，将返回奖励=-0.5并结束回合\n")
+
                     # 脚踏板1: Shift + 左方向键 = 成功
-                    if key == pynput_keyboard.Key.right and _shift_pressed[0]:
+                    elif key == pynput_keyboard.Key.right and _shift_pressed[0]:
                         _space_pressed[0] = True
                         print("\n🦶 [PEDAL-1] 脚踏板1按下！标记为成功 (Shift+←)\n")
 
@@ -390,6 +406,7 @@ class TrainConfig(DefaultTrainingConfig):
             _listener.start()
             print("[PEDAL] 监听器已启动")
             print("[PEDAL] 🦶 踩脚踏板1 (Shift+←) 标记成功")
+            print("[PEDAL] ⌨️  按 Esc 标记不可恢复失败 (reward=-0.5)")
             if self.ENABLE_SPACE_KEY:
                 print("[PEDAL] ⌨️  空格键备选已启用")
             else:
@@ -400,8 +417,16 @@ class TrainConfig(DefaultTrainingConfig):
                 组合奖励函数：
                 1. 分类器预测插入成功（sigmoid > 0.8） + 夹爪松开
                 2. 脚踏板人工标注成功（Shift+←）
-                3. 动作平滑度惩罚（减少抖动）
+                3. Esc 人工标注不可恢复失败（-0.5 并终止）
+                4. 动作平滑度惩罚（减少抖动）
                 """
+                # 失败标注优先于成功标注，每次按键只消费一次。
+                if _failure_pressed[0]:
+                    _failure_pressed[0] = False
+                    _space_pressed[0] = False
+                    print("\n❌ [REWARD] Esc 触发不可恢复失败，返回奖励=-0.5\n")
+                    return -0.5
+
                 # 脚踏板人工标注
                 if _space_pressed[0]:
                     _space_pressed[0] = False
@@ -538,11 +563,14 @@ class TrainConfig(DefaultTrainingConfig):
             def reset_reward_state():
                 # Episode 之间不能计算动作差分。
                 _last_action[0] = None
+                _space_pressed[0] = False
+                _failure_pressed[0] = False
 
             env = MultiCameraBinaryRewardClassifierWrapper(
                 env,
                 reward_func,
                 reward_reset_func=reset_reward_state,
+                terminal_failure_reward=-0.5,
             )
             env = SpacemouseIntervention(env)
 

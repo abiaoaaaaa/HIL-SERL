@@ -20,7 +20,7 @@ Buffer 数据检查工具 - Inspect Buffer Data
     python utils/inspect_buffer.py
 
     # 检查指定文件
-    python utils/inspect_buffer.py --file checkpoints/buffer/transitions_1000.pkl
+    python utils/inspect_buffer.py --file examples/experiments/marvin_usb_insertion/checkpoints_escfail_from392k/buffer/transitions_435000.pkl --save-images --num-images 10
 
     # 保存前 10 帧的图像
     python utils/inspect_buffer.py --save-images --num-images 10
