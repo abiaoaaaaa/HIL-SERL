@@ -261,10 +261,10 @@ class MarvinEnv(gym.Env):
         self.impedance_mode = getattr(config, 'IMPEDANCE_MODE', 'cartesian')
         if self.impedance_mode == 'joint':
             print(f"[MarvinEnv] 使用关节阻抗模式 (IMPEDANCE_MODE={self.impedance_mode})")
-            self._enter_joint_compliance_mode()
         else:
             print(f"[MarvinEnv] 使用笛卡尔阻抗模式 (IMPEDANCE_MODE={self.impedance_mode})")
-            self._enter_compliance_mode()
+        self._switch_to_compliance_mode()
+        self._ensure_compliance_mode()
 
         print("[MarvinEnv] 初始化完成")
 
@@ -624,6 +624,33 @@ class MarvinEnv(gym.Env):
         else:
             self._switch_to_cartesian_compliance_mode()
 
+    def _ensure_compliance_mode(self):
+        """确认阻抗模式已生效；掉出模式时重新切换，失败则停止。"""
+        expected_imp_type = 1 if self.impedance_mode == 'joint' else 2
+        sub = self.robot.subscribe(self.dcss)
+        cur_state = sub['states'][self.arm_idx]['cur_state']
+        imp_type = sub['inputs'][self.arm_idx]['imp_type']
+        if cur_state != 3 or imp_type != expected_imp_type:
+            print(
+                "[MarvinEnv] 阻抗模式未生效，重新切换: "
+                f"state={cur_state}, imp_type={imp_type}"
+            )
+            self._switch_to_compliance_mode()
+            sub = self.robot.subscribe(self.dcss)
+            cur_state = sub['states'][self.arm_idx]['cur_state']
+            imp_type = sub['inputs'][self.arm_idx]['imp_type']
+
+        if cur_state != 3 or imp_type != expected_imp_type:
+            raise RuntimeError(
+                "阻抗模式切换失败，禁止继续运动: "
+                f"state={cur_state}, imp_type={imp_type}, "
+                f"期望 state=3, imp_type={expected_imp_type}"
+            )
+        print(
+            "[MarvinEnv] 阻抗模式确认成功: "
+            f"state={cur_state}, imp_type={imp_type}"
+        )
+
     def _switch_to_cartesian_compliance_mode(self):
         """切换到笛卡尔柔顺模式（带扭矩模式切换 + 重力补偿）"""
         self._set_tool_params()
@@ -671,7 +698,10 @@ class MarvinEnv(gym.Env):
             time.sleep(0.5)
 
         if cur_state != 3 or imp_type != 2:
-            print(f"[_switch_to_cartesian_compliance_mode] ⚠️ 警告: {max_retries}次尝试后仍未切换到笛卡尔阻抗 (当前state={cur_state}, imp_type={imp_type})")
+            raise RuntimeError(
+                f"{max_retries}次尝试后仍未切换到笛卡尔阻抗: "
+                f"state={cur_state}, imp_type={imp_type}"
+            )
 
         # 设置末端笛卡尔控制参数 (参考 spacemouse.enter_compliance_mode step 3)
         self._update_currpos()
@@ -741,7 +771,10 @@ class MarvinEnv(gym.Env):
             time.sleep(0.5)
 
         if cur_state != 3 or imp_type != 1:
-            print(f"[_switch_to_joint_compliance_mode] ⚠️ 警告: {max_retries}次尝试后仍未切换到关节阻抗 (当前state={cur_state}, imp_type={imp_type})")
+            raise RuntimeError(
+                f"{max_retries}次尝试后仍未切换到关节阻抗: "
+                f"state={cur_state}, imp_type={imp_type}"
+            )
 
 
     def _set_tool_params(self):

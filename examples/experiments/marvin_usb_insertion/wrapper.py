@@ -4,9 +4,11 @@ Marvin USB Insertion任务特定环境和Wrapper
 实现Marvin机器人的USB插拔任务逻辑
 参考: franka的usb_pickup_insertion/wrapper.py
 """
+import json
 import numpy as np
 import time
 import gymnasium as gym
+from pathlib import Path
 from typing import OrderedDict
 
 from marvin_env.envs.marvin_env import MarvinEnv
@@ -20,10 +22,10 @@ class MarvinUSBEnv(MarvinEnv):
     Marvin USB插拔任务环境
 
     继承自MarvinEnv，实现USB任务特定的reset逻辑：
-    1. 移动到USB上方
-    2. 下降到USB位置
-    3. 夹取USB
-    4. 抬起到起始位置
+    1. 移动到USB上方并打开夹爪
+    2. 下降夹取并后退抽出
+    3. 移动到随机投放区并释放
+    4. 回到标定关节起始位
     """
 
     def __init__(self, **kwargs):
@@ -65,16 +67,22 @@ class MarvinUSBEnv(MarvinEnv):
         """
         重置环境。
 
-        支持两种模式（由 config.AUTO_RESET_USB 控制）:
+        复位选择:
+
+        RESET_BY_EPISODE_RESULT = True:
+            上一回合成功执行自动复位；失败、超时或首次启动执行手动复位。
+
+        RESET_BY_EPISODE_RESULT = False:
+            继续由 AUTO_RESET_USB 固定选择以下两种模式。
 
         AUTO_RESET_USB = True（自动模式）:
-            1. 错误恢复 → 精密模式 → 打开夹爪
-            2. 移动到USB上方 → 下降 → 夹取
-            3. 抬起 → 移动到reset位置 → 柔顺模式
+            1. 错误恢复并验证阻抗模式
+            2. 示教点上方 → 下降夹取 → 后退抽出
+            3. 随机投放并释放 → 移动到标定关节起始位
 
         AUTO_RESET_USB = False（手动模式）:
             1. 错误恢复
-            2. 机械臂归位到 RESET_POSE + 打开夹爪
+            2. 机械臂归位到标定关节起始位 + 打开夹爪
             3. 等待 MANUAL_RESET_TIMEOUT 秒供人放置USB
             4. 柔顺模式 → 开始episode
         """
@@ -83,8 +91,10 @@ class MarvinUSBEnv(MarvinEnv):
             if self.curr_path_length % self.joint_reset_cycle == 0:
                 print("[MarvinUSBEnv] 执行周期性关节重置")
                 self._recover()
+                self._ensure_compliance_mode()
                 self.go_to_reset(joint_reset=True)
                 self._recover()
+                self._ensure_compliance_mode()
                 self.curr_path_length = 0
                 return self._get_obs(), {"succeed": False}
 
@@ -92,16 +102,12 @@ class MarvinUSBEnv(MarvinEnv):
 
         # ==================== 错误恢复 ====================
         self._recover()
+        self._ensure_compliance_mode()
         self._update_currpos()
         time.sleep(0.1)
 
         # ==================== USB复位 (自动/手动) ====================
-        auto_reset = getattr(self.config, 'AUTO_RESET_USB', False)
-
-        if auto_reset:
-            self._auto_reset_usb()
-        else:
-            self._manual_reset_usb()
+        self._reset_usb_for_last_episode()
 
         # ==================== 重置Episode ====================
         self.curr_path_length = 0
@@ -113,6 +119,29 @@ class MarvinUSBEnv(MarvinEnv):
 
         obs = self._get_obs()
         return obs, {"succeed": False}
+
+    def set_last_episode_result(self, succeeded: bool):
+        """接收外层奖励 wrapper 判定的上一回合结果。"""
+        self._last_episode_succeeded = bool(succeeded)
+
+    def _reset_usb_for_last_episode(self):
+        """按上一回合结果选择复位；结果只消费一次。"""
+        if getattr(self.config, 'RESET_BY_EPISODE_RESULT', False):
+            succeeded = getattr(self, '_last_episode_succeeded', None)
+            self._last_episode_succeeded = None
+            if succeeded is True:
+                print("[MarvinUSBEnv] 上一回合成功，执行自动复位")
+                self._auto_reset_usb()
+            else:
+                reason = "首次启动/无结果" if succeeded is None else "上一回合失败"
+                print(f"[MarvinUSBEnv] {reason}，执行手动复位")
+                self._manual_reset_usb()
+            return
+
+        if getattr(self.config, 'AUTO_RESET_USB', False):
+            self._auto_reset_usb()
+        else:
+            self._manual_reset_usb()
 
     def _movla_to_xyzabc(
         self,
@@ -208,14 +237,21 @@ class MarvinUSBEnv(MarvinEnv):
         self._update_currpos()
 
     def go_to_reset(self, joint_reset=False):
-        if joint_reset:
-            print("[MarvinUSBEnv] 关节重置暂不支持")
-
-        # 打印当前模式
+        """在当前阻抗模式下回到标定关节角。"""
         sub = self.robot.subscribe(self.dcss)
         cur_state = sub['states'][self.arm_idx]['cur_state']
         imp_type = sub['inputs'][self.arm_idx]['imp_type']
         print(f"[go_to_reset] 当前模式: state={cur_state}, imp_type={imp_type}")
+
+        expected_imp_type = 1 if self.impedance_mode == 'joint' else 2
+        if cur_state != 3 or imp_type != expected_imp_type:
+            raise RuntimeError(
+                "关节复位前阻抗模式异常: "
+                f"state={cur_state}, imp_type={imp_type}, "
+                f"期望 state=3, imp_type={expected_imp_type}"
+            )
+        if self.randomreset:
+            raise RuntimeError("关节起始位已启用，RANDOM_RESET 必须为 False")
 
         # 🔧 在移动之前先打开夹爪
         if self.config.USE_GRIPPER:
@@ -223,142 +259,206 @@ class MarvinUSBEnv(MarvinEnv):
             self._send_gripper_command(1.0)
             time.sleep(self.config.GRIPPER_SLEEP)
 
-        # 🛑 停止所有运动指令，避免模式切换冲突
-        print("[go_to_reset] 停止所有运动...")
-        self.robot.stopRunPln_joint(arm=self.arm)
-        time.sleep(0.5)  # 等待停止生效
-
-        # 切到位置模式 (state=1) - 带重试和验证
-        print("[go_to_reset] 切换到位置模式 (state=1)...")
-
-        max_retries = 5
-        for attempt in range(max_retries):
-            self.robot.clear_set()
-            self.robot.set_state(arm=self.arm, state=1)
-            self.robot.set_vel_acc(
-                arm=self.arm,
-                velRatio=self.config.RESET_VEL_RATIO,
-                AccRatio=self.config.RESET_ACC_RATIO,
-            )
-            self.robot.send_cmd()
-            time.sleep(0.3)  # 初始等待
-
-            # 验证是否切换成功
-            for check in range(5):
-                sub = self.robot.subscribe(self.dcss)
-                cur_state = sub['states'][self.arm_idx]['cur_state']
-
-                if cur_state == 1:
-                    print(f"[go_to_reset] ✓ 切换成功: state={cur_state} (尝试{attempt+1}/{max_retries})")
-                    break
-
-                time.sleep(0.2)  # 等待状态稳定
-
-            if cur_state == 1:
-                break
-
-            print(f"[go_to_reset] ✗ 切换失败: state={cur_state}, 重试 {attempt+1}/{max_retries}")
-            time.sleep(0.5)  # 失败后等久一点再重试
-
-        if cur_state != 1:
-            print(f"[go_to_reset] ⚠️ 警告: {max_retries}次尝试后仍未切换到位置模式 (当前state={cur_state})")
-            # 不抛异常，继续执行，但打印明显警告
-
-        if self.randomreset:
-            reset_pose = self.config.RESET_POSE.copy()
-            reset_pose[:2] += np.random.uniform(
-                -self.config.RANDOM_XY_RANGE, self.config.RANDOM_XY_RANGE, (2,)
-            )
-            reset_pose[5] += np.rad2deg(np.random.uniform(
-                -self.config.RANDOM_RZ_RANGE, self.config.RANDOM_RZ_RANGE
-            ))
-            self._movla_to_xyzabc(
-                reset_pose,
-                vel=self.config.RESET_MOVLA_VEL,
-                acc=self.config.RESET_MOVLA_ACC,
-            )
-        else:
-            self._movla_to_xyzabc(
-                self.config.RESET_POSE,
-                vel=self.config.RESET_MOVLA_VEL,
-                acc=self.config.RESET_MOVLA_ACC,
-            )
-
-        print("[go_to_reset] 等待到位...")
-        time.sleep(0.5)
-
-        print("[go_to_reset] 切回柔顺模式...")
-        self._switch_to_compliance_mode()
-
-        # 验证柔顺模式切换
-        for check in range(5):
-            sub = self.robot.subscribe(self.dcss)
-            cur_state = sub['states'][self.arm_idx]['cur_state']
-            imp_type = sub['inputs'][self.arm_idx]['imp_type']
-
-            if cur_state == 3 and imp_type == 2:
-                print(f"[go_to_reset] ✓ 最终模式验证成功: state={cur_state}, imp_type={imp_type}")
-                break
-
-            time.sleep(0.2)
-        else:
-            print(f"[go_to_reset] ⚠️ 最终模式异常: state={cur_state}, imp_type={imp_type} (期望state=3, imp_type=2)")
-
+        self._move_to_reset_joints()
         self._update_currpos()
         self._reset_stream_reference()
-        time.sleep(3)
+        time.sleep(0.5)
+
+    def _load_reset_joints(self):
+        path = Path(self.config.RESET_JOINTS_PATH)
+        if not path.is_file():
+            raise RuntimeError(
+                f"未找到起始关节标定: {path}\n"
+                "请先运行 calibrate_reset_joints.py"
+            )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 1:
+            raise ValueError(f"不支持的关节标定版本: {payload.get('schema_version')}")
+        if payload.get("arm") != self.arm:
+            raise ValueError(
+                f"标定文件属于 {payload.get('arm')} 臂，当前是 {self.arm} 臂"
+            )
+        calibrated_pose = np.asarray(
+            payload.get("reset_pose_xyzabc"), dtype=np.float64
+        )
+        if calibrated_pose.shape != (6,) or not np.allclose(
+            calibrated_pose, self.config.RESET_POSE, atol=1e-6
+        ):
+            raise ValueError("RESET_POSE 已改变，请重新运行关节起始位标定")
+        joints = np.asarray(payload.get("joints_deg"), dtype=np.float64)
+        if joints.shape != (7,) or not np.all(np.isfinite(joints)):
+            raise ValueError(f"标定关节角无效: {joints}")
+        return joints
+
+    def _move_to_reset_joints(self):
+        """阻抗模式下使用五次曲线平滑回到唯一关节起始位。"""
+        target = self._load_reset_joints()
+        self._update_currpos()
+        start = np.asarray(self.curr_joints, dtype=np.float64).copy()
+        max_delta = float(np.max(np.abs(target - start)))
+        max_speed = float(self.config.RESET_JOINT_MAX_SPEED_DEG_S)
+        hz = int(self.config.RESET_JOINT_COMMAND_HZ)
+        if max_speed <= 0.0 or hz <= 0:
+            raise ValueError("关节复位速度/频率配置无效")
+
+        duration = max(
+            float(self.config.RESET_JOINT_MOVE_MIN_DURATION), max_delta / max_speed
+        )
+        steps = max(2, int(np.ceil(duration * hz)))
+        print(
+            f"[go_to_reset] 关节起始位: 最大变化={max_delta:.2f}°, "
+            f"时长={duration:.2f}s, 指令点={steps}"
+        )
+        for phase in np.linspace(0.0, 1.0, steps + 1)[1:]:
+            blend = 10 * phase**3 - 15 * phase**4 + 6 * phase**5
+            self.robot.clear_set()
+            self.robot.set_joint_cmd_pose(
+                arm=self.arm, joints=(start + blend * (target - start)).tolist()
+            )
+            self.robot.send_cmd()
+            time.sleep(1.0 / hz)
+
+        deadline = time.monotonic() + float(self.config.RESET_JOINT_SETTLE_TIMEOUT)
+        tolerance = float(self.config.RESET_JOINT_TOLERANCE_DEG)
+        while True:
+            self._update_currpos()
+            error = float(np.max(np.abs(target - self.curr_joints)))
+            if error <= tolerance:
+                print(f"[go_to_reset] 关节起始位到位，最大误差={error:.3f}°")
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"关节起始位未到位: 最大误差={error:.3f}°, "
+                    f"容差={tolerance:.3f}°"
+                )
+            time.sleep(0.05)
+
+    def _open_gripper_and_wait(self, context):
+        """自动复位专用张爪联锁：确认实测开度后才返回。"""
+        if not self.config.USE_GRIPPER:
+            return
+        if self.gripper is None:
+            raise RuntimeError(f"{context}: 夹爪未初始化，停止自动复位")
+
+        threshold = float(self.config.AUTO_RESET_GRIPPER_OPEN_THRESHOLD)
+        timeout = float(self.config.AUTO_RESET_GRIPPER_OPEN_TIMEOUT)
+        if not 0.0 <= threshold <= 1.0 or timeout < 0.0:
+            raise ValueError("自动复位夹爪打开阈值/超时配置无效")
+
+        last_position = None
+        for attempt in range(1, 3):
+            if not self.gripper.open(blocking=True):
+                print(f"[MarvinUSBEnv] {context}: 张爪指令失败，重试 {attempt}/2")
+                continue
+
+            deadline = time.monotonic() + timeout
+            while True:
+                last_position = float(self.gripper.get_normalized_position())
+                self.curr_gripper_pos = last_position
+                if last_position >= threshold:
+                    print(
+                        f"[MarvinUSBEnv] {context}: 夹爪已打开 "
+                        f"({last_position:.3f} >= {threshold:.3f})"
+                    )
+                    return
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+            print(
+                f"[MarvinUSBEnv] {context}: 开度不足 "
+                f"({last_position:.3f} < {threshold:.3f})，重试 {attempt}/2"
+            )
+
+        measured = "无反馈" if last_position is None else f"{last_position:.3f}"
+        raise RuntimeError(
+            f"{context}: 夹爪未确认打开 (实测={measured}, 阈值={threshold:.3f})，"
+            "停止自动复位，禁止机械臂抬升"
+        )
+
+    def _release_gripper_best_effort(self, context):
+        """投放阶段强制发送张爪指令，不以反馈开度为前提。
+
+        外力卡住时允许指令返回失败，仍然继续复位，并在回到起始位后重试一次。
+        """
+        if not self.config.USE_GRIPPER or self.gripper is None:
+            return
+        try:
+            succeeded = self.gripper.open(blocking=False)
+            if not succeeded:
+                print(f"[MarvinUSBEnv] {context}: 张爪指令未成功，继续复位")
+        except Exception as exc:
+            print(f"[MarvinUSBEnv] {context}: 张爪异常 ({exc})，继续复位")
+        time.sleep(self.config.AUTO_RESET_RELEASE_SETTLE_TIME)
 
     def _auto_reset_usb(self):
-        """自动USB抓取流程: 移动到USB上方 -> 下降 -> 夹取 -> 抬起 -> 移动到reset"""
-        print("[MarvinUSBEnv] 切换到精密模式...")
-        self._switch_to_precision_mode()
+        """按示教关键点抽出并随机投放 USB，最后回到标定关节起始位。"""
+        sub = self.robot.subscribe(self.dcss)
+        cur_state = sub['states'][self.arm_idx]['cur_state']
+        imp_type = sub['inputs'][self.arm_idx]['imp_type']
+        expected_imp_type = 1 if self.impedance_mode == 'joint' else 2
+        if cur_state != 3 or imp_type != expected_imp_type:
+            raise RuntimeError(
+                "自动复位前阻抗模式异常: "
+                f"state={cur_state}, imp_type={imp_type}, "
+                f"期望 state=3, imp_type={expected_imp_type}"
+            )
 
-        # 1. 打开夹爪
+        waypoints = self.config.AUTO_RESET_WAYPOINTS
+        required = ("usb_above", "usb_grasp", "extract_retreat", "drop_center")
+        if set(waypoints) != set(required):
+            raise ValueError(f"AUTO_RESET_WAYPOINTS 必须且只能包含: {required}")
+
+        def move_to(name, target):
+            target = np.asarray(target, dtype=np.float64)
+            if target.shape != (6,) or not np.all(np.isfinite(target)):
+                raise ValueError(f"自动复位点 {name} 无效: {target}")
+            if np.any(target < self.config.ABS_POSE_LIMIT_LOW) or np.any(
+                target > self.config.ABS_POSE_LIMIT_HIGH
+            ):
+                raise ValueError(f"自动复位点 {name} 超出安全边界: {target}")
+            print(f"[MarvinUSBEnv] 自动复位 -> {name}: {target}")
+            self._movla_to_xyzabc(
+                target,
+                vel=self.config.RESET_MOVLA_VEL,
+                acc=self.config.RESET_MOVLA_ACC,
+            )
+            time.sleep(0.3)
+
+        # 1. 到达光模块上方后打开夹爪。
+        move_to("usb_above", waypoints["usb_above"])
+        self._open_gripper_and_wait("抓取前张爪")
+
+        # 2. 下落到两侧并夹紧。
+        move_to("usb_grasp", waypoints["usb_grasp"])
         if self.config.USE_GRIPPER:
-            print("[MarvinUSBEnv] 打开夹爪...")
-            self._send_gripper_command(1.0)
-            time.sleep(self.config.GRIPPER_SLEEP)
-
-        # 2. 移动到USB上方
-        print("[MarvinUSBEnv] 移动到USB上方...")
-        target_above = self.config.GRASP_POSE.copy()
-        target_above[2] += 50  # Z方向上移50mm
-        self._movla_to_xyzabc(target_above)
-        time.sleep(0.5)
-
-        # 3. 下降到USB位置
-        print("[MarvinUSBEnv] 下降到USB位置...")
-        self._movla_to_xyzabc(self.config.GRASP_POSE)
-        time.sleep(0.5)
-
-        # 4. 夹取USB
-        if self.config.USE_GRIPPER:
-            print("[MarvinUSBEnv] 夹取USB...")
             self._send_gripper_command(-1.0)
             time.sleep(self.config.GRIPPER_SLEEP)
 
-        # 5. 抬起USB
-        print("[MarvinUSBEnv] 抬起USB...")
-        self._update_currpos()
-        lift_pose = self.config.GRASP_POSE.copy()
-        lift_pose[2] += 30  # 抬起30mm
-        self._movla_to_xyzabc(lift_pose)
-        time.sleep(0.3)
+        # 3. 后退抽出光模块。
+        move_to("extract_retreat", waypoints["extract_retreat"])
 
-        # 6. 移动到reset位置
-        print("[MarvinUSBEnv] 移动到reset位置...")
-        self._movla_to_xyzabc(self.config.RESET_POSE)
-        time.sleep(0.5)
+        # 4. 在投放中心的 XYZ 半区间内随机选择目标，姿态保持示教值。
+        drop_target = np.asarray(waypoints["drop_center"], dtype=np.float64).copy()
+        half_range = np.asarray(
+            self.config.AUTO_RESET_DROP_RANDOM_HALF_RANGE_MM, dtype=np.float64
+        )
+        if half_range.shape != (3,) or np.any(half_range < 0):
+            raise ValueError(
+                "AUTO_RESET_DROP_RANDOM_HALF_RANGE_MM 必须是三个非负数"
+            )
+        drop_target[:3] += np.random.uniform(-half_range, half_range)
+        move_to("drop_random", drop_target)
+        self._release_gripper_best_effort("投放后张爪")
 
-        # 7. 切换到柔顺模式
-        print("[MarvinUSBEnv] 切换到柔顺模式...")
-        self._switch_to_compliance_mode()
+        # 5. 两套复位逻辑唯一共用的关节起始位。
+        self._move_to_reset_joints()
+        self._release_gripper_best_effort("回位后重试张爪")
 
     def _manual_reset_usb(self):
         """手动复位: 机械臂归位 -> 等待人工放置USB"""
         print("[MarvinUSBEnv] 手动复位模式: 机械臂归位...")
 
-        # 1. 机械臂回到 RESET_POSE
+        # 1. 机械臂回到标定关节起始位
         self.go_to_reset(joint_reset=False)
 
         # 2. 打开夹爪 (如果USB已抓在手中则释放)
@@ -366,6 +466,12 @@ class MarvinUSBEnv(MarvinEnv):
             print("[MarvinUSBEnv] 打开夹爪...")
             self._send_gripper_command(1.0)
             time.sleep(self.config.GRIPPER_SLEEP)
+
+        # 给人工留出放置 USB 的时间，避免 reset 后立即开始下一回合。
+        settle_time = float(getattr(self.config, "MANUAL_RESET_SETTLE_TIME", 2.0))
+        if settle_time > 0.0:
+            print(f"[MarvinUSBEnv] 等待人工放置 USB ({settle_time:.1f}s)...")
+            time.sleep(settle_time)
 
         # 3. 等待人工放置USB
         timeout = getattr(self.config, 'MANUAL_RESET_TIMEOUT', 10.0)

@@ -18,7 +18,7 @@ class HumanClassifierWrapper(gym.Wrapper):
     
     def step(self, action):
         obs, rew, done, truncated, info = self.env.step(action)
-        if done:
+        if done or truncated:
             while True:
                 try:
                     rew = int(input("Success? (1/0)"))
@@ -72,6 +72,12 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         done = done or success or terminal_failure
         info['succeed'] = success
         info['unrecoverable_failure'] = terminal_failure
+        if done:
+            result_callback = getattr(
+                self.env.unwrapped, 'set_last_episode_result', None
+            )
+            if result_callback is not None:
+                result_callback(success)
         if terminal_failure:
             info['failure_reason'] = 'keyboard_esc'
         if self.target_hz is not None:

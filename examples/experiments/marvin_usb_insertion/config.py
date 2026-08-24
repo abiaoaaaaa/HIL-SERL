@@ -98,6 +98,13 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     # RESET_POSE = np.array([356.6, 341.9, 295.0, -91.5, 1.5, -89.4])
     # RESET_POSE = np.array([440.3, 314.6, 302.8, 87.1, 0.0, -94.0])
     RESET_POSE = np.array([ 394.3,  321.7,  200.3,  -90.5005,    -0.501,  -90.001])
+    # calibrate_reset_joints.py 先用 RESET_POSE 做逆解运动，再把实测关节角保存到此文件。
+    RESET_JOINTS_PATH = os.path.join(current_dir, "reset_joints_A.json")
+    RESET_JOINT_MOVE_MIN_DURATION = 2.0  # 秒
+    RESET_JOINT_MAX_SPEED_DEG_S = 15.0
+    RESET_JOINT_COMMAND_HZ = 100
+    RESET_JOINT_TOLERANCE_DEG = 5.0
+    RESET_JOINT_SETTLE_TIMEOUT = 3.0
 
     # 任务完成判定阈值
     REWARD_THRESHOLD = np.array([8.0, 8.0, 8.0, 5.0, 5.0, 5.0])
@@ -216,13 +223,42 @@ class MarvinUSBEnvConfig(DefaultMarvinEnvConfig):
     RESET_MOVLA_ACC = 40
 
     # USB 复位模式
-    AUTO_RESET_USB = False
+    # True: 上一回合成功→自动复位，失败/超时/首次启动→手动复位。
+    # False: 继续由 AUTO_RESET_USB 固定选择自动或手动。
+    RESET_BY_EPISODE_RESULT = True
+    AUTO_RESET_USB = True
+    # 自动复位关键点，来自 auto_reset_waypoints_A_20260820_113151.json。
+    # 初始位置不在这里重复保存，自动复位结束时统一使用 RESET_POSE。
+    AUTO_RESET_WAYPOINTS = {
+        "usb_above": np.array([
+            462.18827569623295, 277.5076074765627, 200.88972781584684,
+            -90.44688588760833, -0.5104418252492733, -86.70726771084439,
+        ]),
+        "usb_grasp": np.array([
+            470.8949711271247, 308.63555195448566, 211.83339824466404,
+            -90.40973190017831, -0.5000117663406858, -88.48318560830577,
+        ]),
+        "extract_retreat": np.array([
+            399.25511175089594, 308.8637106766134, 211.08730557360568,
+            -90.3497328347515, -0.50849599388276755, -88.06984549627005,
+        ]),
+        "drop_center": np.array([
+            400.88389810600916, 390.958261448396, 225.52664437332595,
+            -90.44883542653417, -0.5742922199323391, -82.07417477590442,
+        ]),
+    }
+    AUTO_RESET_DROP_RANDOM_HALF_RANGE_MM = np.array([5.0, 0.0, 20.0])
     MANUAL_RESET_TIMEOUT = 8.0
 
     # 夹爪配置
     USE_GRIPPER = True
     GRIPPER_MOTOR_ID = 1
     GRIPPER_SLEEP = 0.2  # 夹爪动作后等待时间（秒）- 优化：减少连续开闭延迟
+    # 自动复位张爪后必须读到该开度，否则禁止机械臂继续移动。
+    AUTO_RESET_GRIPPER_OPEN_THRESHOLD = 0.8
+    AUTO_RESET_GRIPPER_OPEN_TIMEOUT = 2.0
+    AUTO_RESET_RELEASE_SETTLE_TIME = 1.0
+    MANUAL_RESET_SETTLE_TIME = 2.0
 
 
 class TrainConfig(DefaultTrainingConfig):
