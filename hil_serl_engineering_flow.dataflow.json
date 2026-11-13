@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "HIL-SERL 工程实现数据流",
+    "locale": "zh-CN",
+    "output": "/home/xlb/code_marvin/hil-serl/hil_serl_engineering_flow.html",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 500],
+    "views": [
+      { "id": "startup", "label": "01 启动装配", "focus": ["scripts", "config", "actor", "learner"], "note": "run_actor.sh 与 run_learner.sh 启动 train_rlpd.py；CONFIG_MAPPING 装载 Marvin USB 环境和训练参数。" },
+      { "id": "actor-runtime", "label": "02 Actor 实时链", "focus": ["actor", "env-stack", "transport"], "note": "actor() 采样策略动作；wrapper 链完成限幅、EMA、奖励分类和 SpaceMouse 覆盖，再上传 transition。" },
+      { "id": "data-plane", "label": "03 Transition 数据面", "focus": ["env-stack", "transport", "buffers", "learner"], "note": "QueuedDataStore 经 TrainerClient/Server 进入 actor_env 与 actor_env_intvn，Learner 构造 50/50 batch。" },
+      { "id": "learning-plane", "label": "04 JAX 学习面", "focus": ["buffers", "learner", "jax-agent"], "note": "MemoryEfficientReplayBuffer 打包相邻图像；SACAgent 在多设备上执行 critic、actor、temperature 更新。" },
+      { "id": "sync-resume", "label": "05 同步与恢复", "focus": ["transport", "learner", "jax-agent", "artifacts"], "note": "Learner 周期发布 params 并保存 Flax checkpoint；buffer/demo_buffer 分块 pickle 支持恢复和旧数据迁移。" }
+    ]
+  },
+  "stages": [
+    { "label": "启动与配置" },
+    { "label": "Actor 运行时" },
+    { "label": "通信与缓存" },
+    { "label": "Learner 调度" },
+    { "label": "更新与产物" }
+  ],
+  "nodes": [
+    { "id": "scripts", "type": "frontend", "label": "运行脚本", "sublabel": "run_actor / run_learner", "stage": 0, "row": 0, "tag": "bash" },
+    { "id": "config", "type": "backend", "label": "任务配置", "sublabel": "config.py · mapping", "stage": 0, "row": 2, "tag": "Marvin USB" },
+    { "id": "actor", "type": "backend", "label": "Actor Loop", "sublabel": "train_rlpd.py::actor", "stage": 1, "row": 0, "tag": "inference" },
+    { "id": "env-stack", "type": "external", "label": "环境与 Wrapper", "sublabel": "Marvin · cameras · HIL", "stage": 1, "row": 2, "tag": "10 Hz" },
+    { "id": "transport", "type": "messagebus", "label": "AgentLACE", "sublabel": "Client ↔ Server", "stage": 2, "row": 0, "tag": "5588/5589" },
+    { "id": "buffers", "type": "database", "label": "双 Replay Store", "sublabel": "online / intervention", "stage": 2, "row": 2, "tag": "50/50" },
+    { "id": "learner", "type": "backend", "label": "Learner Loop", "sublabel": "train_rlpd.py::learner", "stage": 3, "row": 1, "tag": "CTA" },
+    { "id": "jax-agent", "type": "backend", "label": "SAC JAX Agent", "sublabel": "ResNet · actor · critics", "stage": 4, "row": 0, "tag": "Flax" },
+    { "id": "artifacts", "type": "database", "label": "训练产物", "sublabel": "ckpt · pickle · W&B", "stage": 4, "row": 2, "tag": "resume" }
+  ],
+  "flows": [
+    { "id": "scripts-actor", "from": "scripts", "to": "actor", "label": "--actor", "classification": "CLI role", "variant": "emphasis", "route": "straight" },
+    { "id": "config-env", "from": "config", "to": "env-stack", "label": "环境 / 奖励配置", "classification": "camera/control", "variant": "default", "route": "straight" },
+    { "id": "actor-env", "from": "actor", "to": "env-stack", "label": "policy action", "classification": "5D control", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "straight", "labelAt": [315, 200] },
+    { "id": "actor-transport", "from": "actor", "to": "transport", "label": "transition / stats", "classification": "AgentLACE", "variant": "emphasis", "route": "straight" },
+    { "id": "env-buffers", "from": "env-stack", "to": "buffers", "label": "在线与干预样本", "classification": "obs,a,r,s',done", "variant": "dashed", "route": "straight" },
+    { "id": "transport-learner", "from": "transport", "to": "learner", "label": "队列同步", "classification": "data store updates", "variant": "default" },
+    { "id": "buffers-learner", "from": "buffers", "to": "learner", "label": "50/50 batch", "classification": "packed pixels", "variant": "emphasis" },
+    { "id": "learner-agent", "from": "learner", "to": "jax-agent", "label": "agent.update", "classification": "critic/actor/alpha", "variant": "emphasis" },
+    { "id": "learner-artifacts", "from": "learner", "to": "artifacts", "label": "周期持久化", "classification": "state + transitions", "variant": "default" },
+    { "id": "agent-sync", "from": "jax-agent", "to": "transport", "label": "publish params", "classification": "network broadcast", "variant": "dashed", "route": "top-channel" }
+  ]
+}

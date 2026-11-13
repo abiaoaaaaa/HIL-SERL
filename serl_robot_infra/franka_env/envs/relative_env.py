@@ -51,6 +51,10 @@ class RelativeFrame(gym.Wrapper):
         # this is to convert the spacemouse intervention action
         if "intervene_action" in info:
             info["intervene_action"] = self.transform_action_inv(info["intervene_action"])
+        if "applied_command_action" in info:
+            info["applied_command_action"] = self.transform_action_inv(
+                info["applied_command_action"]
+            )
 
         # Update transform matrix
         self.transform_matrix = construct_transform_matrix(obs["state"]["tcp_pose"])
@@ -137,7 +141,16 @@ class RelativeFrame(gym.Wrapper):
         using the transform matrix.
         """
         action = np.array(action)
-        action[:6] = np.linalg.inv(self.transform_matrix) @ action[:6]
+        transform_inv = np.linalg.inv(self.transform_matrix)
+        if len(action) >= 6:
+            action[:6] = transform_inv @ action[:6]
+        else:
+            action_6d = np.zeros(6)
+            action_6d[:3] = action[:3]
+            action_6d[5] = action[3]
+            transformed_6d = transform_inv @ action_6d
+            action[:3] = transformed_6d[:3]
+            action[3] = transformed_6d[4]
         return action
 
 

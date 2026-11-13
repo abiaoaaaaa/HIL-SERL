@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "HIL-SERL 算法训练闭环",
+    "locale": "zh-CN",
+    "output": "/home/xlb/code_marvin/hil-serl/hil_serl_algorithm_flow.html",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 500],
+    "views": [
+      { "id": "reward-loop", "label": "01 奖励与终止", "focus": ["reward", "robot", "online-buffer"], "note": "分类器、脚踏板成功和 Esc 失败共同给稀疏奖励；成功或不可恢复失败终止 episode。" },
+      { "id": "human-loop", "label": "02 人工干预", "focus": ["human", "robot", "online-buffer", "demo-buffer"], "note": "SpaceMouse 动作覆盖策略动作；干预 transition 同时进入在线 replay 与 demo buffer。" },
+      { "id": "rlpd-batch", "label": "03 RLPD 混合采样", "focus": ["demo-buffer", "online-buffer", "mixed-batch", "sac"], "note": "Learner 各采一半 demo 与 online transition，拼成 50/50 batch；CTA ratio 让 critic 多更新。" },
+      { "id": "sac-detail", "label": "04 SAC 优化", "focus": ["mixed-batch", "sac", "target-critic", "policy"], "note": "双 Q TD 目标训练 critic；actor 最大化 Q−αlogπ；temperature 自适应熵，target critic 软更新。" },
+      { "id": "control-detail", "label": "05 控制执行", "focus": ["policy", "robot", "online-buffer"], "note": "策略动作先限幅与连续维 EMA，再由环境执行；replay 保存策略/干预动作和下一观测中的已执行动作。" }
+    ]
+  },
+  "stages": [
+    { "label": "监督与交互" },
+    { "label": "经验池" },
+    { "label": "批次构造" },
+    { "label": "策略优化" },
+    { "label": "发布与执行" }
+  ],
+  "nodes": [
+    { "id": "demonstrations", "type": "external", "label": "成功示范", "sublabel": "约 20 条人工轨迹", "stage": 0, "row": 0, "tag": "offline" },
+    { "id": "human", "type": "external", "label": "人工干预", "sublabel": "SpaceMouse override", "stage": 0, "row": 1, "tag": "HIL" },
+    { "id": "reward", "type": "security", "label": "奖励判定", "sublabel": "classifier / pedal / Esc", "stage": 0, "row": 2, "tag": "sparse" },
+    { "id": "demo-buffer", "type": "database", "label": "Demo Buffer", "sublabel": "示范 + 干预 transition", "stage": 1, "row": 0, "tag": "50%" },
+    { "id": "online-buffer", "type": "database", "label": "Online Replay", "sublabel": "策略与干预经验", "stage": 1, "row": 2, "tag": "50%" },
+    { "id": "mixed-batch", "type": "messagebus", "label": "RLPD 混合批次", "sublabel": "demo 1/2 + online 1/2", "stage": 2, "row": 1, "tag": "batch" },
+    { "id": "sac", "type": "backend", "label": "SAC / DrQ 更新", "sublabel": "critic · actor · α", "stage": 3, "row": 1, "tag": "CTA" },
+    { "id": "target-critic", "type": "backend", "label": "Target Critic", "sublabel": "双 Q · soft update", "stage": 3, "row": 2, "tag": "TD" },
+    { "id": "policy", "type": "backend", "label": "视觉运动策略", "sublabel": "ResNet + proprio", "stage": 4, "row": 0, "tag": "π" },
+    { "id": "robot", "type": "external", "label": "Marvin / 环境", "sublabel": "限幅 · EMA · env.step", "stage": 4, "row": 2, "tag": "10 Hz" }
+  ],
+  "flows": [
+    { "id": "demo-ingest", "from": "demonstrations", "to": "demo-buffer", "label": "成功 transition", "classification": "offline demonstrations", "variant": "emphasis", "route": "straight", "labelAt": [208, 95] },
+    { "id": "human-demo", "from": "human", "to": "demo-buffer", "label": "干预片段", "classification": "expert override", "variant": "dashed" },
+    { "id": "human-online", "from": "human", "to": "online-buffer", "label": "覆盖动作", "classification": "intervention transition", "variant": "dashed" },
+    { "id": "reward-online", "from": "reward", "to": "online-buffer", "label": "r / done", "classification": "rewarded transition", "variant": "security", "route": "straight", "labelAt": [208, 428] },
+    { "id": "demo-mix", "from": "demo-buffer", "to": "mixed-batch", "label": "半批样本", "classification": "batch_size / 2", "variant": "emphasis" },
+    { "id": "online-mix", "from": "online-buffer", "to": "mixed-batch", "label": "半批样本", "classification": "batch_size / 2", "variant": "default" },
+    { "id": "mix-update", "from": "mixed-batch", "to": "sac", "label": "增强后 batch", "classification": "obs,a,r,s',mask", "variant": "emphasis" },
+    { "id": "sac-target", "from": "sac", "to": "target-critic", "label": "软更新", "classification": "target params", "variant": "default", "fromSide": "bottom", "toSide": "top", "route": "straight", "labelAt": [745, 314] },
+    { "id": "sac-policy", "from": "sac", "to": "policy", "label": "发布参数", "classification": "actor network", "variant": "emphasis" },
+    { "id": "policy-robot", "from": "policy", "to": "robot", "label": "连续 + 夹爪动作", "classification": "5D action", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "straight", "labelAt": [960, 200] },
+    { "id": "robot-replay", "from": "robot", "to": "online-buffer", "label": "新 transition", "classification": "online experience", "variant": "dashed", "route": "bottom-channel" }
+  ]
+}

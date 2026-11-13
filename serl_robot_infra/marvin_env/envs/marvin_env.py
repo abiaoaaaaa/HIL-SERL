@@ -1285,7 +1285,12 @@ class MarvinEnv(gym.Env):
             elif horizon_reached:
                 self.audio_notifier.play_failure(reason="timeout")
 
-        return obs, float(reward), done, False, {"succeed": pose_success}
+        return obs, float(reward), done, False, {
+            "succeed": pose_success,
+            # High-level command accepted by the safety guards, before the
+            # streaming/interpolation controller expands it into sub-steps.
+            "applied_command_action": action.copy(),
+        }
 
     def _execute_sub_step(self, action: np.ndarray, raw_action: np.ndarray, t: dict, sub_step: int, gripper_action: float):
         """
